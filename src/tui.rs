@@ -101,15 +101,17 @@ enum FilterMessage {
     Done(u64),
 }
 
+const RANK_CRITERIA: &[RankCriteria] =
+    &[RankCriteria::Score, RankCriteria::Begin, RankCriteria::End];
+
 #[derive(Clone)]
 struct FilteredEntry {
     idx: usize,
     match_indices: Vec<usize>,
     rank: Rank,
+    start_time: i64,
 }
 
-// Ordering only for BinaryHeap; actual sort uses sort_key with criteria.
-// Lower sort_key means better match → PartialOrd makes that "greater" for max-heap.
 impl PartialOrd for FilteredEntry {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
@@ -118,14 +120,20 @@ impl PartialOrd for FilteredEntry {
 
 impl Ord for FilteredEntry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Higher score = better = Greater in max-heap
-        self.rank.score.cmp(&other.rank.score)
+        // Max-heap: larger order = pops first. sort_key gives smaller-is-better,
+        // so reverse a/b. Tiebreak on start_time (newer first).
+        other
+            .rank
+            .sort_key(RANK_CRITERIA)
+            .cmp(&self.rank.sort_key(RANK_CRITERIA))
+            .then_with(|| self.start_time.cmp(&other.start_time))
     }
 }
 
 impl PartialEq for FilteredEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.rank.score == other.rank.score
+        self.rank.sort_key(RANK_CRITERIA) == other.rank.sort_key(RANK_CRITERIA)
+            && self.start_time == other.start_time
     }
 }
 
@@ -308,6 +316,9 @@ impl App {
             self.entry_rx = Some(rx);
         }
         self.loading = !done;
+        if done && self.input.trim().is_empty() {
+            self.filter_done = true;
+        }
         if self.entries.len() > old_len {
             if self.input.trim().is_empty() {
                 let criteria = self.active_filter_criteria();
@@ -318,6 +329,7 @@ impl App {
                             idx,
                             match_indices: Vec::new(),
                             rank: Rank::default(),
+                            start_time: self.entries[idx].start_time,
                         }),
                 );
             } else {
@@ -350,12 +362,15 @@ impl App {
         let criteria = self.active_filter_criteria();
         let query = self.input.trim();
         if query.is_empty() {
+            self.heap.clear();
+            self.filter_done = true;
             self.filtered = (0..self.entries.len())
                 .filter(|idx| criteria.matches(&self.entries[*idx]))
                 .map(|idx| FilteredEntry {
                     idx,
                     match_indices: Vec::new(),
                     rank: Rank::default(),
+                    start_time: self.entries[idx].start_time,
                 })
                 .collect();
             self.filter_token += 1;
@@ -381,7 +396,6 @@ impl App {
     }
 
     fn check_filter_results(&mut self) {
-        let criteria = &[RankCriteria::Score, RankCriteria::Begin, RankCriteria::End];
         let mut received = false;
         loop {
             match self.filter_rx.try_recv() {
@@ -394,18 +408,10 @@ impl App {
                         match msg {
                             FilterMessage::Done(_) => {
                                 self.filter_done = true;
-                                let mut v: Vec<FilteredEntry> = self.heap.drain().collect();
-                                v.sort_by(|a, b| {
-                                    a.rank
-                                        .sort_key(criteria)
-                                        .cmp(&b.rank.sort_key(criteria))
-                                        .then_with(|| {
-                                            self.entries[b.idx]
-                                                .start_time
-                                                .cmp(&self.entries[a.idx].start_time)
-                                        })
-                                });
-                                self.filtered = v;
+                                // Clear filtered (heap still has everything from
+                                // the peek push-back). Lazy-pop from heap as
+                                // the user scrolls.
+                                self.filtered.clear();
                                 self.clamp_filter_state();
                             }
                             FilterMessage::Batch(_, batch) => {
@@ -429,16 +435,6 @@ impl App {
                     break;
                 }
             }
-            top.sort_by(|a, b| {
-                a.rank
-                    .sort_key(criteria)
-                    .cmp(&b.rank.sort_key(criteria))
-                    .then_with(|| {
-                        self.entries[b.idx]
-                            .start_time
-                            .cmp(&self.entries[a.idx].start_time)
-                    })
-            });
             self.filtered = top.clone();
             for fe in top {
                 self.heap.push(fe);
@@ -447,13 +443,34 @@ impl App {
         }
     }
 
+    fn total_filtered(&self) -> usize {
+        if self.filter_done {
+            self.filtered.len() + self.heap.len()
+        } else {
+            // During filtering, filtered holds clones of peeked entries; heap
+            // has the canonical set (including the peeked ones).
+            self.heap.len()
+        }
+    }
+
+    fn ensure_filtered_len(&mut self, needed: usize) {
+        while self.filtered.len() < needed {
+            if let Some(fe) = self.heap.pop() {
+                self.filtered.push(fe);
+            } else {
+                break;
+            }
+        }
+    }
+
     fn clamp_filter_state(&mut self) {
-        if self.filtered.is_empty() {
+        let total = self.total_filtered();
+        if total == 0 {
             self.selected = 0;
             self.scroll = 0;
         } else {
-            if self.selected >= self.filtered.len() {
-                self.selected = self.filtered.len() - 1;
+            if self.selected >= total {
+                self.selected = total - 1;
             }
             let visible = self.list_height as usize;
             if self.selected < self.scroll as usize {
@@ -474,11 +491,12 @@ impl App {
     }
 
     fn move_selection(&mut self, delta: i32) {
-        if self.filtered.is_empty() {
+        let total = self.total_filtered();
+        if total == 0 {
             return;
         }
         let new = self.selected as i32 + delta;
-        self.selected = new.clamp(0, self.filtered.len() as i32 - 1) as usize;
+        self.selected = new.clamp(0, total as i32 - 1) as usize;
         let visible = self.list_height as usize;
         if self.selected < self.scroll as usize {
             self.scroll = self.selected as u16;
@@ -500,6 +518,7 @@ impl App {
                         self.running = false;
                     }
                     KeyCode::Enter => {
+                        self.ensure_filtered_len(self.selected + 1);
                         if let Some(entry) = self.selected_entry() {
                             self.output = self
                                 .histdb_info
@@ -510,6 +529,7 @@ impl App {
                         }
                     }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.ensure_filtered_len(self.selected + 1);
                         if let Some(entry) = self.selected_entry() {
                             osc52_copy(&entry.argv);
                         }
@@ -635,6 +655,8 @@ impl App {
     }
 
     fn render_list_and_details(&mut self, f: &mut Frame, area: Rect) {
+        self.ensure_filtered_len(self.selected.saturating_add(1));
+
         let split = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -661,6 +683,10 @@ impl App {
         f.render_widget(Paragraph::new(header), split[0]);
 
         self.list_height = split[1].height;
+
+        self.ensure_filtered_len(
+            (self.scroll as usize + split[1].height as usize).min(self.total_filtered()),
+        );
 
         let items: Vec<ListItem> = self
             .filtered
@@ -762,6 +788,7 @@ impl App {
             format!("{left} ↑↓:nav  enter:select  ^c:copy  esc:quit "),
             Style::default().bg(Color::Indexed(234)),
         );
+        let match_count = self.total_filtered();
         let suffix = if self.loading {
             format!(
                 " {}/{} (loading...) ",
@@ -771,11 +798,11 @@ impl App {
         } else if !self.filter_done && !self.input.trim().is_empty() {
             format!(
                 " {}/{} (filtering...) ",
-                self.heap.len(),
+                match_count,
                 self.entries.len()
             )
         } else {
-            format!(" {}/{} ", self.filtered.len(), self.entries.len())
+            format!(" {}/{} ", match_count, self.entries.len())
         };
         let count = Span::raw(suffix);
         let line = Line::from(vec![status, count]);
@@ -889,6 +916,7 @@ fn run_filter_streaming(
                     idx: batch_start + i,
                     match_indices,
                     rank: result.rank,
+                    start_time: batch[i].start_time,
                 })
             })
             .collect();
@@ -956,15 +984,7 @@ mod tests {
                 heap.extend(batch);
             }
         }
-        let criteria = &[RankCriteria::Score, RankCriteria::Begin, RankCriteria::End];
-        let mut v: Vec<FilteredEntry> = heap.into_vec();
-        v.sort_by(|a, b| {
-            a.rank
-                .sort_key(criteria)
-                .cmp(&b.rank.sort_key(criteria))
-                .then_with(|| entries[b.idx].start_time.cmp(&entries[a.idx].start_time))
-        });
-        v
+        std::iter::from_fn(|| heap.pop()).collect()
     }
 
     fn run_filter(
@@ -980,6 +1000,7 @@ mod tests {
                     idx,
                     match_indices: vec![],
                     rank: Rank::default(),
+                    start_time: entries[idx].start_time,
                 })
                 .collect();
         }
@@ -1092,14 +1113,7 @@ mod tests {
                 _ => {}
             }
         }
-        let criteria = &[RankCriteria::Score, RankCriteria::Begin, RankCriteria::End];
-        let mut v: Vec<FilteredEntry> = heap.into_vec();
-        v.sort_by(|a, b| {
-            a.rank
-                .sort_key(criteria)
-                .cmp(&b.rank.sort_key(criteria))
-                .then_with(|| entries[b.idx].start_time.cmp(&entries[a.idx].start_time))
-        });
+        let v: Vec<FilteredEntry> = std::iter::from_fn(|| heap.pop()).collect();
         assert_eq!(v.len(), 1);
         assert_eq!(entries[v[0].idx].argv, "unique_target_command");
     }
@@ -1163,4 +1177,49 @@ mod tests {
             prev_score = fe.rank.score;
         }
     }
+
+    #[test]
+    fn heap_newer_first_on_score_tie() {
+        // Entries that both contain "match" — scores should be similar.
+        // Newer entry (higher start_time) should pop first when scores tie.
+        let entries = vec![
+            entry(1, 1000, "older match entry"),
+            entry(2, 2000, "newer match entry"),
+        ];
+        let (tx, rx) = mpsc::channel();
+        run_filter_streaming(
+            "match",
+            &entries,
+            &AtomicBool::new(false),
+            1,
+            &tx,
+            &FilterCriteria::none(),
+        );
+        drop(tx);
+        let mut heap = std::collections::BinaryHeap::new();
+        while let Ok(msg) = rx.recv() {
+            if let FilterMessage::Batch(_, batch) = msg {
+                heap.extend(batch);
+            }
+        }
+        let results: Vec<FilteredEntry> = std::iter::from_fn(|| heap.pop()).collect();
+        assert_eq!(results.len(), 2);
+        // If scores are equal, newer (higher start_time) should be first.
+        if results[0].rank.score == results[1].rank.score {
+            assert!(
+                results[0].start_time > results[1].start_time,
+                "same score: expected newer first. Got start_times {} then {}",
+                results[0].start_time,
+                results[1].start_time,
+            );
+        }
+        // Regardless, first entry should not have a worse score.
+        assert!(
+            results[0].rank.score >= results[1].rank.score,
+            "first entry score {} < second entry score {}",
+            results[0].rank.score,
+            results[1].rank.score,
+        );
+    }
+
 }

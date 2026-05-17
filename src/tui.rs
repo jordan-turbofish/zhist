@@ -20,6 +20,39 @@ use skim::prelude::*;
 
 use crate::db::{self, HistdbInfo, HistoryEntry};
 
+const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(B64[((triple >> 18) & 0x3f) as usize] as char);
+        out.push(B64[((triple >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(B64[((triple >> 6) & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(B64[(triple & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn osc52_copy(text: &str) {
+    use io::Write;
+    let b64 = base64_encode(text.as_bytes());
+    let mut stderr = io::stderr();
+    let _ = write!(stderr, "\x1b]52;c;{}\x07", b64);
+    let _ = stderr.flush();
+}
+
 fn bold() -> Style {
     Style::default().add_modifier(Modifier::BOLD)
 }
@@ -223,11 +256,13 @@ impl App {
     fn run_terminal(&mut self, mut out: impl io::Write) {
         crossterm::terminal::enable_raw_mode().expect("raw mode");
         crossterm::execute!(out, crossterm::terminal::EnterAlternateScreen).ok();
-        let mut terminal =
-            Terminal::new(CrosstermBackend::new(out)).expect("terminal init");
+        let mut terminal = Terminal::new(CrosstermBackend::new(out)).expect("terminal init");
         self.event_loop(&mut terminal);
-        crossterm::execute!(terminal.backend_mut(), crossterm::terminal::LeaveAlternateScreen)
-            .ok();
+        crossterm::execute!(
+            terminal.backend_mut(),
+            crossterm::terminal::LeaveAlternateScreen
+        )
+        .ok();
         crossterm::terminal::disable_raw_mode().expect("raw mode disable");
     }
 
@@ -276,16 +311,15 @@ impl App {
         if self.entries.len() > old_len {
             if self.input.trim().is_empty() {
                 let criteria = self.active_filter_criteria();
-                self.filtered
-                    .extend(
-                        (old_len..self.entries.len())
-                            .filter(|idx| criteria.matches(&self.entries[*idx]))
-                            .map(|idx| FilteredEntry {
-                                idx,
-                                match_indices: Vec::new(),
-                                rank: Rank::default(),
-                            }),
-                    );
+                self.filtered.extend(
+                    (old_len..self.entries.len())
+                        .filter(|idx| criteria.matches(&self.entries[*idx]))
+                        .map(|idx| FilteredEntry {
+                            idx,
+                            match_indices: Vec::new(),
+                            rank: Rank::default(),
+                        }),
+                );
             } else {
                 self.filter_entries();
             }
@@ -473,6 +507,11 @@ impl App {
                                 .then(|| Some(entry.argv.clone()))
                                 .flatten();
                             self.running = false;
+                        }
+                    }
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Some(entry) = self.selected_entry() {
+                            osc52_copy(&entry.argv);
                         }
                     }
                     KeyCode::Up => self.move_selection(-1),
@@ -720,7 +759,7 @@ impl App {
         let dc = if self.filter_dir { '●' } else { '○' };
         let left = format!(" {hc}h {sc}s {dc}d ");
         let status = Span::styled(
-            format!("{left} ↑↓:nav  enter:select  esc:quit "),
+            format!("{left} ↑↓:nav  enter:select  ^c:copy  esc:quit "),
             Style::default().bg(Color::Indexed(234)),
         );
         let suffix = if self.loading {
@@ -730,7 +769,11 @@ impl App {
                 self.entries.len()
             )
         } else if !self.filter_done && !self.input.trim().is_empty() {
-            format!(" {}/{} (filtering...) ", self.heap.len(), self.entries.len())
+            format!(
+                " {}/{} (filtering...) ",
+                self.heap.len(),
+                self.entries.len()
+            )
         } else {
             format!(" {}/{} ", self.filtered.len(), self.entries.len())
         };
@@ -909,7 +952,9 @@ mod tests {
         drop(tx);
         let mut heap = std::collections::BinaryHeap::new();
         while let Ok(msg) = rx.recv() {
-            if let FilterMessage::Batch(_, batch) = msg { heap.extend(batch); }
+            if let FilterMessage::Batch(_, batch) = msg {
+                heap.extend(batch);
+            }
         }
         let criteria = &[RankCriteria::Score, RankCriteria::Begin, RankCriteria::End];
         let mut v: Vec<FilteredEntry> = heap.into_vec();
@@ -1102,7 +1147,9 @@ mod tests {
         drop(tx);
         let mut heap = std::collections::BinaryHeap::new();
         while let Ok(msg) = rx.recv() {
-            if let FilterMessage::Batch(_, batch) = msg { heap.extend(batch); }
+            if let FilterMessage::Batch(_, batch) = msg {
+                heap.extend(batch);
+            }
         }
         // Pop and verify scores are descending
         let mut prev_score = i32::MAX;

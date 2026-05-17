@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "zhist")]
 #[command(about = "Query zsh history database")]
+#[command(version)]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,

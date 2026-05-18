@@ -23,7 +23,7 @@ use crate::db::{self, HistdbInfo, HistoryEntry};
 const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 fn base64_encode(data: &[u8]) -> String {
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
@@ -139,6 +139,59 @@ impl PartialEq for FilteredEntry {
 
 impl Eq for FilteredEntry {}
 
+struct FilterHeap {
+    heap: std::collections::BinaryHeap<FilteredEntry>,
+}
+
+impl FilterHeap {
+    fn new() -> Self {
+        Self {
+            heap: std::collections::BinaryHeap::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.heap.clear();
+    }
+
+    fn extend(&mut self, batch: Vec<FilteredEntry>) {
+        self.heap.extend(batch);
+    }
+
+    #[allow(dead_code)]
+    fn push(&mut self, fe: FilteredEntry) {
+        self.heap.push(fe);
+    }
+
+    fn pop(&mut self) -> Option<FilteredEntry> {
+        self.heap.pop()
+    }
+
+    fn len(&self) -> usize {
+        self.heap.len()
+    }
+
+    fn top_n(&mut self, n: usize) -> Vec<FilteredEntry> {
+        let mut top = Vec::with_capacity(n);
+        for _ in 0..n {
+            if let Some(fe) = self.heap.pop() {
+                top.push(fe);
+            } else {
+                break;
+            }
+        }
+        for fe in &top {
+            self.heap.push(fe.clone());
+        }
+        top
+    }
+
+    #[allow(dead_code)]
+    fn drain(&mut self) -> Vec<FilteredEntry> {
+        std::iter::from_fn(|| self.heap.pop()).collect()
+    }
+}
+
 struct FilterCriteria {
     host: Option<String>,
     session: Option<i64>,
@@ -146,6 +199,7 @@ struct FilterCriteria {
 }
 
 impl FilterCriteria {
+    #[allow(dead_code)]
     fn none() -> Self {
         FilterCriteria {
             host: None,
@@ -155,21 +209,18 @@ impl FilterCriteria {
     }
 
     fn matches(&self, entry: &HistoryEntry) -> bool {
-        if let Some(ref host) = self.host {
-            if entry.host != *host {
+        if let Some(ref host) = self.host
+            && entry.host != *host {
                 return false;
             }
-        }
-        if let Some(session) = self.session {
-            if entry.session != session {
+        if let Some(session) = self.session
+            && entry.session != session {
                 return false;
             }
-        }
-        if let Some(ref dir) = self.dir {
-            if entry.dir != *dir {
+        if let Some(ref dir) = self.dir
+            && entry.dir != *dir {
                 return false;
             }
-        }
         true
     }
 }
@@ -190,7 +241,7 @@ pub struct App {
     filter_rx: mpsc::Receiver<FilterMessage>,
     filter_tx: mpsc::Sender<FilterMessage>,
     cancel_flag: Arc<AtomicBool>,
-    heap: std::collections::BinaryHeap<FilteredEntry>,
+    heap: FilterHeap,
     filter_done: bool,
     histdb_info: HistdbInfo,
     filter_host: bool,
@@ -226,7 +277,7 @@ impl App {
             filter_rx,
             filter_tx,
             cancel_flag: Arc::new(AtomicBool::new(false)),
-            heap: std::collections::BinaryHeap::new(),
+            heap: FilterHeap::new(),
             filter_done: false,
             histdb_info: HistdbInfo::from_env(),
             filter_host: false,
@@ -427,18 +478,7 @@ impl App {
         }
         if received && !self.filter_done {
             let n = (self.list_height as usize).max(20);
-            let mut top: Vec<FilteredEntry> = Vec::with_capacity(n);
-            for _ in 0..n {
-                if let Some(fe) = self.heap.pop() {
-                    top.push(fe);
-                } else {
-                    break;
-                }
-            }
-            self.filtered = top.clone();
-            for fe in top {
-                self.heap.push(fe);
-            }
+            self.filtered = self.heap.top_n(n);
             self.clamp_filter_state();
         }
     }
@@ -544,18 +584,16 @@ impl App {
                         let page = (self.list_height as i32).max(1);
                         self.move_selection(page);
                     }
-                    KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if self.histdb_info.host.is_some() {
+                    KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && self.histdb_info.host.is_some() => {
                             self.filter_host = !self.filter_host;
                             self.filter_entries();
                         }
-                    }
-                    KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if self.histdb_info.session.is_some() {
+                    KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && self.histdb_info.session.is_some() => {
                             self.filter_session = !self.filter_session;
                             self.filter_entries();
                         }
-                    }
                     KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         self.filter_dir = !self.filter_dir;
                         self.filter_entries();
@@ -568,29 +606,25 @@ impl App {
                         self.cursor += 1;
                         self.filter_entries();
                     }
-                    KeyCode::Backspace => {
-                        if self.cursor > 0 {
+                    KeyCode::Backspace
+                        if self.cursor > 0 => {
                             self.cursor -= 1;
                             self.input.remove(self.cursor);
                             self.filter_entries();
                         }
-                    }
-                    KeyCode::Delete => {
-                        if self.cursor < self.input.len() {
+                    KeyCode::Delete
+                        if self.cursor < self.input.len() => {
                             self.input.remove(self.cursor);
                             self.filter_entries();
                         }
-                    }
-                    KeyCode::Left => {
-                        if self.cursor > 0 {
+                    KeyCode::Left
+                        if self.cursor > 0 => {
                             self.cursor -= 1;
                         }
-                    }
-                    KeyCode::Right => {
-                        if self.cursor < self.input.len() {
+                    KeyCode::Right
+                        if self.cursor < self.input.len() => {
                             self.cursor += 1;
                         }
-                    }
                     KeyCode::Home => self.cursor = 0,
                     KeyCode::End => self.cursor = self.input.len(),
                     _ => {}
@@ -738,14 +772,13 @@ impl App {
                         Span::raw(format_full_time(entry.start_time)),
                     ]),
                 ];
-                if let Some(fe) = filtered {
-                    if fe.rank != Rank::default() {
+                if let Some(fe) = filtered
+                    && fe.rank != Rank::default() {
                         lines.push(Line::from(vec![
                             b("Score:       "),
                             Span::raw(format!("{}", fe.rank.score)),
                         ]));
                     }
-                }
                 lines.extend(vec![
                     Line::from(vec![
                         b("Runtime:     "),
@@ -978,13 +1011,13 @@ mod tests {
             &FilterCriteria::none(),
         );
         drop(tx);
-        let mut heap = std::collections::BinaryHeap::new();
+        let mut heap = FilterHeap::new();
         while let Ok(msg) = rx.recv() {
             if let FilterMessage::Batch(_, batch) = msg {
                 heap.extend(batch);
             }
         }
-        std::iter::from_fn(|| heap.pop()).collect()
+        heap.drain()
     }
 
     fn run_filter(
@@ -1105,7 +1138,7 @@ mod tests {
             );
         });
 
-        let mut heap = std::collections::BinaryHeap::new();
+        let mut heap = FilterHeap::new();
         while let Ok(msg) = rx.recv() {
             match msg {
                 FilterMessage::Batch(t, batch) if t == token_b => heap.extend(batch),
@@ -1113,7 +1146,7 @@ mod tests {
                 _ => {}
             }
         }
-        let v: Vec<FilteredEntry> = std::iter::from_fn(|| heap.pop()).collect();
+        let v: Vec<FilteredEntry> = heap.drain();
         assert_eq!(v.len(), 1);
         assert_eq!(entries[v[0].idx].argv, "unique_target_command");
     }
@@ -1159,7 +1192,7 @@ mod tests {
             &FilterCriteria::none(),
         );
         drop(tx);
-        let mut heap = std::collections::BinaryHeap::new();
+        let mut heap = FilterHeap::new();
         while let Ok(msg) = rx.recv() {
             if let FilterMessage::Batch(_, batch) = msg {
                 heap.extend(batch);
@@ -1167,7 +1200,7 @@ mod tests {
         }
         // Pop and verify scores are descending
         let mut prev_score = i32::MAX;
-        while let Some(fe) = heap.pop() {
+        for fe in heap.drain() {
             assert!(
                 fe.rank.score <= prev_score,
                 "heap popped score {} after {}, ordering broken",
@@ -1196,13 +1229,13 @@ mod tests {
             &FilterCriteria::none(),
         );
         drop(tx);
-        let mut heap = std::collections::BinaryHeap::new();
+        let mut heap = FilterHeap::new();
         while let Ok(msg) = rx.recv() {
             if let FilterMessage::Batch(_, batch) = msg {
                 heap.extend(batch);
             }
         }
-        let results: Vec<FilteredEntry> = std::iter::from_fn(|| heap.pop()).collect();
+        let results: Vec<FilteredEntry> = heap.drain();
         assert_eq!(results.len(), 2);
         // If scores are equal, newer (higher start_time) should be first.
         if results[0].rank.score == results[1].rank.score {

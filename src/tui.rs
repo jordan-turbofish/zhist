@@ -139,6 +139,59 @@ impl PartialEq for FilteredEntry {
 
 impl Eq for FilteredEntry {}
 
+struct FilterHeap {
+    heap: std::collections::BinaryHeap<FilteredEntry>,
+}
+
+impl FilterHeap {
+    fn new() -> Self {
+        Self {
+            heap: std::collections::BinaryHeap::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.heap.clear();
+    }
+
+    fn extend(&mut self, batch: Vec<FilteredEntry>) {
+        self.heap.extend(batch);
+    }
+
+    #[allow(dead_code)]
+    fn push(&mut self, fe: FilteredEntry) {
+        self.heap.push(fe);
+    }
+
+    fn pop(&mut self) -> Option<FilteredEntry> {
+        self.heap.pop()
+    }
+
+    fn len(&self) -> usize {
+        self.heap.len()
+    }
+
+    fn top_n(&mut self, n: usize) -> Vec<FilteredEntry> {
+        let mut top = Vec::with_capacity(n);
+        for _ in 0..n {
+            if let Some(fe) = self.heap.pop() {
+                top.push(fe);
+            } else {
+                break;
+            }
+        }
+        for fe in &top {
+            self.heap.push(fe.clone());
+        }
+        top
+    }
+
+    #[allow(dead_code)]
+    fn drain(&mut self) -> Vec<FilteredEntry> {
+        std::iter::from_fn(|| self.heap.pop()).collect()
+    }
+}
+
 struct FilterCriteria {
     host: Option<String>,
     session: Option<i64>,
@@ -146,6 +199,7 @@ struct FilterCriteria {
 }
 
 impl FilterCriteria {
+    #[allow(dead_code)]
     fn none() -> Self {
         FilterCriteria {
             host: None,
@@ -190,7 +244,7 @@ pub struct App {
     filter_rx: mpsc::Receiver<FilterMessage>,
     filter_tx: mpsc::Sender<FilterMessage>,
     cancel_flag: Arc<AtomicBool>,
-    heap: std::collections::BinaryHeap<FilteredEntry>,
+    heap: FilterHeap,
     filter_done: bool,
     histdb_info: HistdbInfo,
     filter_host: bool,
@@ -226,7 +280,7 @@ impl App {
             filter_rx,
             filter_tx,
             cancel_flag: Arc::new(AtomicBool::new(false)),
-            heap: std::collections::BinaryHeap::new(),
+            heap: FilterHeap::new(),
             filter_done: false,
             histdb_info: HistdbInfo::from_env(),
             filter_host: false,
@@ -427,18 +481,7 @@ impl App {
         }
         if received && !self.filter_done {
             let n = (self.list_height as usize).max(20);
-            let mut top: Vec<FilteredEntry> = Vec::with_capacity(n);
-            for _ in 0..n {
-                if let Some(fe) = self.heap.pop() {
-                    top.push(fe);
-                } else {
-                    break;
-                }
-            }
-            self.filtered = top.clone();
-            for fe in top {
-                self.heap.push(fe);
-            }
+            self.filtered = self.heap.top_n(n);
             self.clamp_filter_state();
         }
     }
@@ -978,13 +1021,13 @@ mod tests {
             &FilterCriteria::none(),
         );
         drop(tx);
-        let mut heap = std::collections::BinaryHeap::new();
+        let mut heap = FilterHeap::new();
         while let Ok(msg) = rx.recv() {
             if let FilterMessage::Batch(_, batch) = msg {
                 heap.extend(batch);
             }
         }
-        std::iter::from_fn(|| heap.pop()).collect()
+        heap.drain()
     }
 
     fn run_filter(
@@ -1105,7 +1148,7 @@ mod tests {
             );
         });
 
-        let mut heap = std::collections::BinaryHeap::new();
+        let mut heap = FilterHeap::new();
         while let Ok(msg) = rx.recv() {
             match msg {
                 FilterMessage::Batch(t, batch) if t == token_b => heap.extend(batch),
@@ -1113,7 +1156,7 @@ mod tests {
                 _ => {}
             }
         }
-        let v: Vec<FilteredEntry> = std::iter::from_fn(|| heap.pop()).collect();
+        let v: Vec<FilteredEntry> = heap.drain();
         assert_eq!(v.len(), 1);
         assert_eq!(entries[v[0].idx].argv, "unique_target_command");
     }
@@ -1159,7 +1202,7 @@ mod tests {
             &FilterCriteria::none(),
         );
         drop(tx);
-        let mut heap = std::collections::BinaryHeap::new();
+        let mut heap = FilterHeap::new();
         while let Ok(msg) = rx.recv() {
             if let FilterMessage::Batch(_, batch) = msg {
                 heap.extend(batch);
@@ -1167,7 +1210,7 @@ mod tests {
         }
         // Pop and verify scores are descending
         let mut prev_score = i32::MAX;
-        while let Some(fe) = heap.pop() {
+        for fe in heap.drain() {
             assert!(
                 fe.rank.score <= prev_score,
                 "heap popped score {} after {}, ordering broken",
@@ -1196,13 +1239,13 @@ mod tests {
             &FilterCriteria::none(),
         );
         drop(tx);
-        let mut heap = std::collections::BinaryHeap::new();
+        let mut heap = FilterHeap::new();
         while let Ok(msg) = rx.recv() {
             if let FilterMessage::Batch(_, batch) = msg {
                 heap.extend(batch);
             }
         }
-        let results: Vec<FilteredEntry> = std::iter::from_fn(|| heap.pop()).collect();
+        let results: Vec<FilteredEntry> = heap.drain();
         assert_eq!(results.len(), 2);
         // If scores are equal, newer (higher start_time) should be first.
         if results[0].rank.score == results[1].rank.score {

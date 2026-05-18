@@ -36,7 +36,7 @@ impl HistoryEntry {
              JOIN places p ON h.place_id = p.id
              ORDER BY h.start_time DESC",
         )?;
-        let rows = stmt.query_map([], |row| Self::from_row(row))?;
+        let rows = stmt.query_map([], Self::from_row)?;
         rows.collect()
     }
 
@@ -53,7 +53,7 @@ impl HistoryEntry {
              JOIN places p ON h.place_id = p.id
              ORDER BY h.start_time DESC",
         )?;
-        let rows = stmt.query_map([], |row| Self::from_row(row))?;
+        let rows = stmt.query_map([], Self::from_row)?;
         let mut chunk = Vec::with_capacity(batch_size);
         for row in rows {
             chunk.push(row?);

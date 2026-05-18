@@ -23,7 +23,7 @@ use crate::db::{self, HistdbInfo, HistoryEntry};
 const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 fn base64_encode(data: &[u8]) -> String {
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
@@ -209,21 +209,18 @@ impl FilterCriteria {
     }
 
     fn matches(&self, entry: &HistoryEntry) -> bool {
-        if let Some(ref host) = self.host {
-            if entry.host != *host {
+        if let Some(ref host) = self.host
+            && entry.host != *host {
                 return false;
             }
-        }
-        if let Some(session) = self.session {
-            if entry.session != session {
+        if let Some(session) = self.session
+            && entry.session != session {
                 return false;
             }
-        }
-        if let Some(ref dir) = self.dir {
-            if entry.dir != *dir {
+        if let Some(ref dir) = self.dir
+            && entry.dir != *dir {
                 return false;
             }
-        }
         true
     }
 }
@@ -587,18 +584,16 @@ impl App {
                         let page = (self.list_height as i32).max(1);
                         self.move_selection(page);
                     }
-                    KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if self.histdb_info.host.is_some() {
+                    KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && self.histdb_info.host.is_some() => {
                             self.filter_host = !self.filter_host;
                             self.filter_entries();
                         }
-                    }
-                    KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if self.histdb_info.session.is_some() {
+                    KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && self.histdb_info.session.is_some() => {
                             self.filter_session = !self.filter_session;
                             self.filter_entries();
                         }
-                    }
                     KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         self.filter_dir = !self.filter_dir;
                         self.filter_entries();
@@ -611,29 +606,25 @@ impl App {
                         self.cursor += 1;
                         self.filter_entries();
                     }
-                    KeyCode::Backspace => {
-                        if self.cursor > 0 {
+                    KeyCode::Backspace
+                        if self.cursor > 0 => {
                             self.cursor -= 1;
                             self.input.remove(self.cursor);
                             self.filter_entries();
                         }
-                    }
-                    KeyCode::Delete => {
-                        if self.cursor < self.input.len() {
+                    KeyCode::Delete
+                        if self.cursor < self.input.len() => {
                             self.input.remove(self.cursor);
                             self.filter_entries();
                         }
-                    }
-                    KeyCode::Left => {
-                        if self.cursor > 0 {
+                    KeyCode::Left
+                        if self.cursor > 0 => {
                             self.cursor -= 1;
                         }
-                    }
-                    KeyCode::Right => {
-                        if self.cursor < self.input.len() {
+                    KeyCode::Right
+                        if self.cursor < self.input.len() => {
                             self.cursor += 1;
                         }
-                    }
                     KeyCode::Home => self.cursor = 0,
                     KeyCode::End => self.cursor = self.input.len(),
                     _ => {}
@@ -781,14 +772,13 @@ impl App {
                         Span::raw(format_full_time(entry.start_time)),
                     ]),
                 ];
-                if let Some(fe) = filtered {
-                    if fe.rank != Rank::default() {
+                if let Some(fe) = filtered
+                    && fe.rank != Rank::default() {
                         lines.push(Line::from(vec![
                             b("Score:       "),
                             Span::raw(format!("{}", fe.rank.score)),
                         ]));
                     }
-                }
                 lines.extend(vec![
                     Line::from(vec![
                         b("Runtime:     "),

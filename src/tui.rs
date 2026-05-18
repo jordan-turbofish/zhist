@@ -247,6 +247,10 @@ pub struct App {
     filter_host: bool,
     filter_session: bool,
     filter_dir: bool,
+    select_filter_host: Option<String>,
+    select_filter_session: Option<i64>,
+    select_filter_dir: Option<String>,
+    restore_entry_idx: Option<usize>,
     current_dir: Option<String>,
     initial_query: Option<String>,
 }
@@ -283,6 +287,10 @@ impl App {
             filter_host: false,
             filter_session: false,
             filter_dir: false,
+            select_filter_host: None,
+            select_filter_session: None,
+            select_filter_dir: None,
+            restore_entry_idx: None,
             current_dir: std::env::current_dir()
                 .ok()
                 .and_then(|p| p.to_str().map(String::from)),
@@ -390,22 +398,33 @@ impl App {
     }
 
     fn active_filter_criteria(&self) -> FilterCriteria {
-        FilterCriteria {
-            host: if self.filter_host {
-                self.histdb_info.host.clone()
-            } else {
-                None
-            },
-            session: if self.filter_session {
-                self.histdb_info.session
-            } else {
-                None
-            },
-            dir: if self.filter_dir {
-                self.current_dir.clone()
-            } else {
-                None
-            },
+        let using_select = self.select_filter_host.is_some()
+            || self.select_filter_session.is_some()
+            || self.select_filter_dir.is_some();
+        if using_select {
+            FilterCriteria {
+                host: self.select_filter_host.clone(),
+                session: self.select_filter_session,
+                dir: self.select_filter_dir.clone(),
+            }
+        } else {
+            FilterCriteria {
+                host: if self.filter_host {
+                    self.histdb_info.host.clone()
+                } else {
+                    None
+                },
+                session: if self.filter_session {
+                    self.histdb_info.session
+                } else {
+                    None
+                },
+                dir: if self.filter_dir {
+                    self.current_dir.clone()
+                } else {
+                    None
+                },
+            }
         }
     }
 
@@ -425,6 +444,7 @@ impl App {
                 })
                 .collect();
             self.filter_token += 1;
+            self.restore_selection();
             self.clamp_filter_state();
             return;
         }
@@ -463,6 +483,7 @@ impl App {
                                 // the peek push-back). Lazy-pop from heap as
                                 // the user scrolls.
                                 self.filtered.clear();
+                                self.restore_selection();
                                 self.clamp_filter_state();
                             }
                             FilterMessage::Batch(_, batch) => {
@@ -500,6 +521,33 @@ impl App {
             } else {
                 break;
             }
+        }
+    }
+
+    fn restore_selection(&mut self) {
+        let target = match self.restore_entry_idx.take() {
+            Some(idx) => idx,
+            None => return,
+        };
+        if let Some(pos) = self.filtered.iter().position(|fe| fe.idx == target) {
+            self.selected = pos;
+            return;
+        }
+        let mut drained = Vec::new();
+        let mut found = None;
+        while let Some(fe) = self.heap.pop() {
+            if fe.idx == target {
+                found = Some(fe);
+                break;
+            }
+            drained.push(fe);
+        }
+        for fe in drained {
+            self.heap.push(fe);
+        }
+        if let Some(fe) = found {
+            self.filtered.push(fe);
+            self.selected = self.filtered.len() - 1;
         }
     }
 
@@ -586,17 +634,89 @@ impl App {
                     }
                     KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL)
                         && self.histdb_info.host.is_some() => {
+                            let entry_idx = self.selected_filtered().map(|fe| fe.idx);
+                            self.select_filter_host = None;
+                            self.select_filter_session = None;
+                            self.select_filter_dir = None;
                             self.filter_host = !self.filter_host;
+                            if let Some(idx) = entry_idx {
+                                self.restore_entry_idx = Some(idx);
+                            }
                             self.filter_entries();
                         }
                     KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL)
                         && self.histdb_info.session.is_some() => {
+                            let entry_idx = self.selected_filtered().map(|fe| fe.idx);
+                            self.select_filter_host = None;
+                            self.select_filter_session = None;
+                            self.select_filter_dir = None;
                             self.filter_session = !self.filter_session;
+                            if let Some(idx) = entry_idx {
+                                self.restore_entry_idx = Some(idx);
+                            }
                             self.filter_entries();
                         }
                     KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        let entry_idx = self.selected_filtered().map(|fe| fe.idx);
+                        self.select_filter_host = None;
+                        self.select_filter_session = None;
+                        self.select_filter_dir = None;
                         self.filter_dir = !self.filter_dir;
+                        if let Some(idx) = entry_idx {
+                            self.restore_entry_idx = Some(idx);
+                        }
                         self.filter_entries();
+                    }
+                    KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::ALT) => {
+                        let host = self.selected_entry().map(|e| e.host.clone());
+                        let entry_idx = self.selected_filtered().map(|fe| fe.idx);
+                        if let (Some(host), Some(entry_idx)) = (host, entry_idx) {
+                            self.filter_host = false;
+                            self.filter_session = false;
+                            self.filter_dir = false;
+                            if self.select_filter_host.as_ref() == Some(&host) {
+                                self.select_filter_host = None;
+                                self.restore_entry_idx = Some(entry_idx);
+                            } else {
+                                self.select_filter_host = Some(host);
+                                self.restore_entry_idx = Some(entry_idx);
+                            }
+                            self.filter_entries();
+                        }
+                    }
+                    KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::ALT) => {
+                        let session = self.selected_entry().map(|e| e.session);
+                        let entry_idx = self.selected_filtered().map(|fe| fe.idx);
+                        if let (Some(session), Some(entry_idx)) = (session, entry_idx) {
+                            self.filter_host = false;
+                            self.filter_session = false;
+                            self.filter_dir = false;
+                            if self.select_filter_session == Some(session) {
+                                self.select_filter_session = None;
+                                self.restore_entry_idx = Some(entry_idx);
+                            } else {
+                                self.select_filter_session = Some(session);
+                                self.restore_entry_idx = Some(entry_idx);
+                            }
+                            self.filter_entries();
+                        }
+                    }
+                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::ALT) => {
+                        let dir = self.selected_entry().map(|e| e.dir.clone());
+                        let entry_idx = self.selected_filtered().map(|fe| fe.idx);
+                        if let (Some(dir), Some(entry_idx)) = (dir, entry_idx) {
+                            self.filter_host = false;
+                            self.filter_session = false;
+                            self.filter_dir = false;
+                            if self.select_filter_dir.as_ref() == Some(&dir) {
+                                self.select_filter_dir = None;
+                                self.restore_entry_idx = Some(entry_idx);
+                            } else {
+                                self.select_filter_dir = Some(dir);
+                                self.restore_entry_idx = Some(entry_idx);
+                            }
+                            self.filter_entries();
+                        }
                     }
                     KeyCode::Char(c)
                         if !key.modifiers.contains(KeyModifiers::CONTROL)
@@ -813,9 +933,9 @@ impl App {
     }
 
     fn render_status(&self, f: &mut Frame, area: Rect) {
-        let hc = if self.filter_host { '●' } else { '○' };
-        let sc = if self.filter_session { '●' } else { '○' };
-        let dc = if self.filter_dir { '●' } else { '○' };
+        let hc = if self.filter_host || self.select_filter_host.is_some() { '●' } else { '○' };
+        let sc = if self.filter_session || self.select_filter_session.is_some() { '●' } else { '○' };
+        let dc = if self.filter_dir || self.select_filter_dir.is_some() { '●' } else { '○' };
         let left = format!(" {hc}h {sc}s {dc}d ");
         let status = Span::styled(
             format!("{left} ↑↓:nav  enter:select  ^c:copy  esc:quit "),

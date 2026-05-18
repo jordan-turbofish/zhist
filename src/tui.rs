@@ -837,9 +837,13 @@ impl App {
         } else {
             format!(" {}/{} ", match_count, self.entries.len())
         };
-        let count = Span::raw(suffix);
-        let line = Line::from(vec![status, count]);
-        f.render_widget(Paragraph::new(line), area);
+        let count_w = suffix.len() as u16;
+        let hlayout = Layout::horizontal([Constraint::Min(0), Constraint::Length(count_w)])
+            .split(area);
+        let status_line = Line::from(status);
+        f.render_widget(Paragraph::new(status_line), hlayout[0]);
+        let count_line = Line::from(Span::raw(suffix));
+        f.render_widget(Paragraph::new(count_line), hlayout[1]);
     }
 }
 

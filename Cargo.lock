@@ -277,6 +277,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "chrono-english"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38a56613410c9249673f4676ab8d27c70949814accb27b6b738009e2ff1034a1"
+dependencies = [
+ "chrono",
+ "scanlex",
+]
+
+[[package]]
 name = "clap"
 version = "4.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1922,6 +1932,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
+name = "scanlex"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "088c5d71572124929ea7549a8ce98e1a6fd33d0a38367b09027b382e67c033db"
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2999,6 +3015,7 @@ name = "zhist"
 version = "0.1.5"
 dependencies = [
  "chrono",
+ "chrono-english",
  "clap",
  "crossterm",
  "ratatui",

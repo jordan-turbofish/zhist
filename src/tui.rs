@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -6,6 +7,7 @@ use std::sync::mpsc::{self, TryRecvError};
 use std::time::Duration;
 
 use chrono::{DateTime, Local, Utc};
+use chrono_english::{Dialect, parse_date_string};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame, Terminal,
@@ -13,7 +15,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
 };
 use rayon::prelude::*;
 use skim::prelude::*;
@@ -94,6 +96,21 @@ impl SkimItem for EntryItem {
     fn text(&self) -> Cow<'_, str> {
         Cow::Borrowed(&self.entry.argv)
     }
+}
+
+struct FilterItem {
+    text: String,
+}
+
+impl SkimItem for FilterItem {
+    fn text(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.text)
+    }
+}
+
+struct OverlayFiltered {
+    idx: usize,
+    match_indices: Vec<usize>,
 }
 
 enum FilterMessage {
@@ -193,36 +210,65 @@ impl FilterHeap {
 }
 
 struct FilterCriteria {
-    host: Option<String>,
-    session: Option<i64>,
-    dir: Option<String>,
+    hosts: Vec<String>,
+    sessions: Vec<i64>,
+    dirs: Vec<String>,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
 }
 
 impl FilterCriteria {
     #[allow(dead_code)]
     fn none() -> Self {
         FilterCriteria {
-            host: None,
-            session: None,
-            dir: None,
+            hosts: Vec::new(),
+            sessions: Vec::new(),
+            dirs: Vec::new(),
+            start_time: None,
+            end_time: None,
         }
     }
 
     fn matches(&self, entry: &HistoryEntry) -> bool {
-        if let Some(ref host) = self.host
-            && entry.host != *host {
+        if !self.hosts.is_empty() && !self.hosts.contains(&entry.host) {
+            return false;
+        }
+        if !self.sessions.is_empty() && !self.sessions.contains(&entry.session) {
+            return false;
+        }
+        if !self.dirs.is_empty() && !self.dirs.contains(&entry.dir) {
+            return false;
+        }
+        if let Some(start) = self.start_time {
+            if entry.start_time < start {
                 return false;
             }
-        if let Some(session) = self.session
-            && entry.session != session {
+        }
+        if let Some(end) = self.end_time {
+            if entry.start_time > end {
                 return false;
             }
-        if let Some(ref dir) = self.dir
-            && entry.dir != *dir {
-                return false;
-            }
+        }
         true
     }
+}
+
+#[derive(PartialEq, Eq)]
+enum OverlayFocus {
+    Left,
+    Right,
+}
+
+#[derive(PartialEq, Eq)]
+enum TimeField {
+    Start,
+    End,
+}
+
+#[derive(PartialEq, Eq)]
+enum OverlayRightFocus {
+    Filter,
+    List,
 }
 
 pub struct App {
@@ -244,15 +290,31 @@ pub struct App {
     heap: FilterHeap,
     filter_done: bool,
     histdb_info: HistdbInfo,
-    filter_host: bool,
-    filter_session: bool,
-    filter_dir: bool,
-    select_filter_host: Option<String>,
-    select_filter_session: Option<i64>,
-    select_filter_dir: Option<String>,
+    selected_hosts: HashSet<String>,
+    selected_sessions: HashSet<i64>,
+    selected_dirs: HashSet<String>,
     restore_entry_idx: Option<usize>,
     current_dir: Option<String>,
     initial_query: Option<String>,
+    show_overlay: bool,
+    overlay_active_item: usize,
+    overlay_focus: OverlayFocus,
+    overlay_host_selected: usize,
+    overlay_dir_selected: usize,
+    overlay_start_time: String,
+    overlay_start_cursor: usize,
+    overlay_end_time: String,
+    overlay_end_cursor: usize,
+    overlay_active_time_field: TimeField,
+    overlay_right_subfocus: OverlayRightFocus,
+    overlay_host_filter: String,
+    overlay_host_filter_cursor: usize,
+    overlay_host_filtered: Vec<OverlayFiltered>,
+    overlay_dir_filter: String,
+    overlay_dir_filter_cursor: usize,
+    overlay_dir_filtered: Vec<OverlayFiltered>,
+    all_hosts: Vec<String>,
+    all_dirs: Vec<String>,
 }
 
 impl App {
@@ -284,17 +346,33 @@ impl App {
             heap: FilterHeap::new(),
             filter_done: false,
             histdb_info: HistdbInfo::from_env(),
-            filter_host: false,
-            filter_session: false,
-            filter_dir: false,
-            select_filter_host: None,
-            select_filter_session: None,
-            select_filter_dir: None,
+            selected_hosts: HashSet::new(),
+            selected_sessions: HashSet::new(),
+            selected_dirs: HashSet::new(),
             restore_entry_idx: None,
             current_dir: std::env::current_dir()
                 .ok()
                 .and_then(|p| p.to_str().map(String::from)),
             initial_query,
+            show_overlay: false,
+            overlay_active_item: 0,
+            overlay_focus: OverlayFocus::Left,
+            overlay_host_selected: 0,
+            overlay_dir_selected: 0,
+            overlay_start_time: String::new(),
+            overlay_start_cursor: 0,
+            overlay_end_time: String::new(),
+            overlay_end_cursor: 0,
+            overlay_active_time_field: TimeField::Start,
+            overlay_right_subfocus: OverlayRightFocus::List,
+            overlay_host_filter: String::new(),
+            overlay_host_filter_cursor: 0,
+            overlay_host_filtered: Vec::new(),
+            overlay_dir_filter: String::new(),
+            overlay_dir_filter_cursor: 0,
+            overlay_dir_filtered: Vec::new(),
+            all_hosts: Vec::new(),
+            all_dirs: Vec::new(),
         }
     }
 
@@ -379,6 +457,24 @@ impl App {
             self.filter_done = true;
         }
         if self.entries.len() > old_len {
+            let mut hosts_changed = false;
+            let mut dirs_changed = false;
+            for entry in &self.entries[old_len..] {
+                if !self.all_hosts.contains(&entry.host) {
+                    self.all_hosts.push(entry.host.clone());
+                    hosts_changed = true;
+                }
+                if !self.all_dirs.contains(&entry.dir) {
+                    self.all_dirs.push(entry.dir.clone());
+                    dirs_changed = true;
+                }
+            }
+            if hosts_changed && self.show_overlay {
+                self.update_host_filter();
+            }
+            if dirs_changed && self.show_overlay {
+                self.update_dir_filter();
+            }
             if self.input.trim().is_empty() {
                 let criteria = self.active_filter_criteria();
                 self.filtered.extend(
@@ -397,34 +493,25 @@ impl App {
         }
     }
 
+    fn parse_time_input(input: &str, end_of_day: bool) -> Option<i64> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let dt = parse_date_string(trimmed, Local::now(), Dialect::Us).ok()?;
+        if end_of_day && dt.time().format("%H:%M:%S").to_string() == "00:00:00" {
+            return Some(dt.timestamp() + 86_399);
+        }
+        Some(dt.timestamp())
+    }
+
     fn active_filter_criteria(&self) -> FilterCriteria {
-        let using_select = self.select_filter_host.is_some()
-            || self.select_filter_session.is_some()
-            || self.select_filter_dir.is_some();
-        if using_select {
-            FilterCriteria {
-                host: self.select_filter_host.clone(),
-                session: self.select_filter_session,
-                dir: self.select_filter_dir.clone(),
-            }
-        } else {
-            FilterCriteria {
-                host: if self.filter_host {
-                    self.histdb_info.host.clone()
-                } else {
-                    None
-                },
-                session: if self.filter_session {
-                    self.histdb_info.session
-                } else {
-                    None
-                },
-                dir: if self.filter_dir {
-                    self.current_dir.clone()
-                } else {
-                    None
-                },
-            }
+        FilterCriteria {
+            hosts: self.selected_hosts.iter().cloned().collect(),
+            sessions: self.selected_sessions.iter().cloned().collect(),
+            dirs: self.selected_dirs.iter().cloned().collect(),
+            start_time: Self::parse_time_input(&self.overlay_start_time, false),
+            end_time: Self::parse_time_input(&self.overlay_end_time, true),
         }
     }
 
@@ -596,162 +683,505 @@ impl App {
     fn handle_event(&mut self) {
         if let Ok(event) = event::read() {
             match event {
-                Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                    KeyCode::Esc => {
-                        self.output = self
-                            .histdb_info
-                            .widget
-                            .then(|| self.initial_query.clone())
-                            .flatten();
-                        self.running = false;
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if self.show_overlay {
+                        self.handle_overlay_event(key);
+                        return;
                     }
-                    KeyCode::Enter => {
-                        self.ensure_filtered_len(self.selected + 1);
-                        if let Some(entry) = self.selected_entry() {
+                    match key.code {
+                        KeyCode::Esc => {
                             self.output = self
                                 .histdb_info
                                 .widget
-                                .then(|| Some(entry.argv.clone()))
+                                .then(|| self.initial_query.clone())
                                 .flatten();
                             self.running = false;
                         }
-                    }
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.ensure_filtered_len(self.selected + 1);
-                        if let Some(entry) = self.selected_entry() {
-                            osc52_copy(&entry.argv);
+                        KeyCode::Enter => {
+                            self.ensure_filtered_len(self.selected + 1);
+                            if let Some(entry) = self.selected_entry() {
+                                self.output = self
+                                    .histdb_info
+                                    .widget
+                                    .then(|| Some(entry.argv.clone()))
+                                    .flatten();
+                                self.running = false;
+                            }
                         }
-                    }
-                    KeyCode::Up => self.move_selection(-1),
-                    KeyCode::Down => self.move_selection(1),
-                    KeyCode::PageUp => {
-                        let page = (self.list_height as i32).max(1);
-                        self.move_selection(-page);
-                    }
-                    KeyCode::PageDown => {
-                        let page = (self.list_height as i32).max(1);
-                        self.move_selection(page);
-                    }
-                    KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL)
-                        && self.histdb_info.host.is_some() => {
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.ensure_filtered_len(self.selected + 1);
+                            if let Some(entry) = self.selected_entry() {
+                                osc52_copy(&entry.argv);
+                            }
+                        }
+                        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.show_overlay = true;
+                            self.overlay_focus = OverlayFocus::Left;
+                            self.overlay_right_subfocus = OverlayRightFocus::List;
+                            self.overlay_host_filter.clear();
+                            self.overlay_host_filter_cursor = 0;
+                            self.overlay_dir_filter.clear();
+                            self.overlay_dir_filter_cursor = 0;
+                            self.update_host_filter();
+                            self.update_dir_filter();
+                        }
+                        KeyCode::Up => self.move_selection(-1),
+                        KeyCode::Down => self.move_selection(1),
+                        KeyCode::PageUp => {
+                            let page = (self.list_height as i32).max(1);
+                            self.move_selection(-page);
+                        }
+                        KeyCode::PageDown => {
+                            let page = (self.list_height as i32).max(1);
+                            self.move_selection(page);
+                        }
+                        KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL)
+                            && self.histdb_info.host.is_some() => {
+                                let entry_idx = self.selected_filtered().map(|fe| fe.idx);
+                                let host = self.histdb_info.host.clone().unwrap();
+                                if self.selected_hosts.contains(&host) {
+                                    self.selected_hosts.remove(&host);
+                                } else {
+                                    self.selected_hosts.insert(host);
+                                }
+                                if let Some(idx) = entry_idx {
+                                    self.restore_entry_idx = Some(idx);
+                                }
+                                self.filter_entries();
+                            }
+                        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL)
+                            && self.histdb_info.session.is_some() => {
+                                let entry_idx = self.selected_filtered().map(|fe| fe.idx);
+                                let session = self.histdb_info.session.unwrap();
+                                if self.selected_sessions.contains(&session) {
+                                    self.selected_sessions.remove(&session);
+                                } else {
+                                    self.selected_sessions.insert(session);
+                                }
+                                if let Some(idx) = entry_idx {
+                                    self.restore_entry_idx = Some(idx);
+                                }
+                                self.filter_entries();
+                            }
+                        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             let entry_idx = self.selected_filtered().map(|fe| fe.idx);
-                            self.select_filter_host = None;
-                            self.select_filter_session = None;
-                            self.select_filter_dir = None;
-                            self.filter_host = !self.filter_host;
+                            if let Some(ref dir) = self.current_dir {
+                                let dir = dir.clone();
+                                if self.selected_dirs.contains(&dir) {
+                                    self.selected_dirs.remove(&dir);
+                                } else {
+                                    self.selected_dirs.insert(dir);
+                                }
+                            }
                             if let Some(idx) = entry_idx {
                                 self.restore_entry_idx = Some(idx);
                             }
                             self.filter_entries();
                         }
-                    KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL)
-                        && self.histdb_info.session.is_some() => {
+                        KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::ALT) => {
+                            let host = self.selected_entry().map(|e| e.host.clone());
                             let entry_idx = self.selected_filtered().map(|fe| fe.idx);
-                            self.select_filter_host = None;
-                            self.select_filter_session = None;
-                            self.select_filter_dir = None;
-                            self.filter_session = !self.filter_session;
-                            if let Some(idx) = entry_idx {
-                                self.restore_entry_idx = Some(idx);
+                            if let (Some(host), Some(entry_idx)) = (host, entry_idx) {
+                                if self.selected_hosts.contains(&host) {
+                                    self.selected_hosts.remove(&host);
+                                } else {
+                                    self.selected_hosts.insert(host);
+                                }
+                                self.restore_entry_idx = Some(entry_idx);
+                                self.filter_entries();
                             }
-                            self.filter_entries();
                         }
-                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        let entry_idx = self.selected_filtered().map(|fe| fe.idx);
-                        self.select_filter_host = None;
-                        self.select_filter_session = None;
-                        self.select_filter_dir = None;
-                        self.filter_dir = !self.filter_dir;
-                        if let Some(idx) = entry_idx {
-                            self.restore_entry_idx = Some(idx);
-                        }
-                        self.filter_entries();
-                    }
-                    KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::ALT) => {
-                        let host = self.selected_entry().map(|e| e.host.clone());
-                        let entry_idx = self.selected_filtered().map(|fe| fe.idx);
-                        if let (Some(host), Some(entry_idx)) = (host, entry_idx) {
-                            self.filter_host = false;
-                            self.filter_session = false;
-                            self.filter_dir = false;
-                            if self.select_filter_host.as_ref() == Some(&host) {
-                                self.select_filter_host = None;
+                        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::ALT) => {
+                            let session = self.selected_entry().map(|e| e.session);
+                            let entry_idx = self.selected_filtered().map(|fe| fe.idx);
+                            if let (Some(session), Some(entry_idx)) = (session, entry_idx) {
+                                if self.selected_sessions.contains(&session) {
+                                    self.selected_sessions.remove(&session);
+                                } else {
+                                    self.selected_sessions.insert(session);
+                                }
                                 self.restore_entry_idx = Some(entry_idx);
-                            } else {
-                                self.select_filter_host = Some(host);
-                                self.restore_entry_idx = Some(entry_idx);
+                                self.filter_entries();
                             }
-                            self.filter_entries();
                         }
-                    }
-                    KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::ALT) => {
-                        let session = self.selected_entry().map(|e| e.session);
-                        let entry_idx = self.selected_filtered().map(|fe| fe.idx);
-                        if let (Some(session), Some(entry_idx)) = (session, entry_idx) {
-                            self.filter_host = false;
-                            self.filter_session = false;
-                            self.filter_dir = false;
-                            if self.select_filter_session == Some(session) {
-                                self.select_filter_session = None;
+                        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::ALT) => {
+                            let dir = self.selected_entry().map(|e| e.dir.clone());
+                            let entry_idx = self.selected_filtered().map(|fe| fe.idx);
+                            if let (Some(dir), Some(entry_idx)) = (dir, entry_idx) {
+                                if self.selected_dirs.contains(&dir) {
+                                    self.selected_dirs.remove(&dir);
+                                } else {
+                                    self.selected_dirs.insert(dir);
+                                }
                                 self.restore_entry_idx = Some(entry_idx);
-                            } else {
-                                self.select_filter_session = Some(session);
-                                self.restore_entry_idx = Some(entry_idx);
+                                self.filter_entries();
                             }
-                            self.filter_entries();
                         }
-                    }
-                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::ALT) => {
-                        let dir = self.selected_entry().map(|e| e.dir.clone());
-                        let entry_idx = self.selected_filtered().map(|fe| fe.idx);
-                        if let (Some(dir), Some(entry_idx)) = (dir, entry_idx) {
-                            self.filter_host = false;
-                            self.filter_session = false;
-                            self.filter_dir = false;
-                            if self.select_filter_dir.as_ref() == Some(&dir) {
-                                self.select_filter_dir = None;
-                                self.restore_entry_idx = Some(entry_idx);
-                            } else {
-                                self.select_filter_dir = Some(dir);
-                                self.restore_entry_idx = Some(entry_idx);
-                            }
-                            self.filter_entries();
-                        }
-                    }
-                    KeyCode::Char(c)
-                        if !key.modifiers.contains(KeyModifiers::CONTROL)
-                            && !key.modifiers.contains(KeyModifiers::ALT) =>
-                    {
-                        self.input.insert(self.cursor, c);
-                        self.cursor += 1;
-                        self.filter_entries();
-                    }
-                    KeyCode::Backspace
-                        if self.cursor > 0 => {
-                            self.cursor -= 1;
-                            self.input.remove(self.cursor);
-                            self.filter_entries();
-                        }
-                    KeyCode::Delete
-                        if self.cursor < self.input.len() => {
-                            self.input.remove(self.cursor);
-                            self.filter_entries();
-                        }
-                    KeyCode::Left
-                        if self.cursor > 0 => {
-                            self.cursor -= 1;
-                        }
-                    KeyCode::Right
-                        if self.cursor < self.input.len() => {
+                        KeyCode::Char(c)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && !key.modifiers.contains(KeyModifiers::ALT) =>
+                        {
+                            self.input.insert(self.cursor, c);
                             self.cursor += 1;
+                            self.filter_entries();
                         }
-                    KeyCode::Home => self.cursor = 0,
-                    KeyCode::End => self.cursor = self.input.len(),
-                    _ => {}
-                },
+                        KeyCode::Backspace
+                            if self.cursor > 0 => {
+                                self.cursor -= 1;
+                                self.input.remove(self.cursor);
+                                self.filter_entries();
+                            }
+                        KeyCode::Delete
+                            if self.cursor < self.input.len() => {
+                                self.input.remove(self.cursor);
+                                self.filter_entries();
+                            }
+                        KeyCode::Left
+                            if self.cursor > 0 => {
+                                self.cursor -= 1;
+                            }
+                        KeyCode::Right
+                            if self.cursor < self.input.len() => {
+                                self.cursor += 1;
+                            }
+                        KeyCode::Home => self.cursor = 0,
+                        KeyCode::End => self.cursor = self.input.len(),
+                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.input.clear();
+                            self.cursor = 0;
+                            self.filter_entries();
+                        }
+                        _ => {}
+                    }
+                }
                 _ => {}
             }
         }
+    }
+
+    fn handle_overlay_event(&mut self, key: crossterm::event::KeyEvent) {
+        let in_filter_subfocus = self.overlay_focus == OverlayFocus::Right
+            && (self.overlay_active_item == 0 || self.overlay_active_item == 1)
+            && self.overlay_right_subfocus == OverlayRightFocus::Filter;
+
+        match key.code {
+            KeyCode::Esc => {
+                self.show_overlay = false;
+            }
+            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.show_overlay = false;
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                if self.overlay_focus == OverlayFocus::Left {
+                    self.overlay_focus = OverlayFocus::Right;
+                    if self.overlay_active_item == 0 || self.overlay_active_item == 1 {
+                        self.overlay_right_subfocus = OverlayRightFocus::Filter;
+                    }
+                } else {
+                    self.overlay_focus = OverlayFocus::Left;
+                }
+            }
+            KeyCode::Enter => {
+                if self.overlay_focus == OverlayFocus::Left {
+                    self.overlay_focus = OverlayFocus::Right;
+                    if self.overlay_active_item == 0 || self.overlay_active_item == 1 {
+                        self.overlay_right_subfocus = OverlayRightFocus::Filter;
+                    }
+                } else if self.overlay_focus == OverlayFocus::Right && self.overlay_active_item == 2 {
+                    match self.overlay_active_time_field {
+                        TimeField::Start => self.overlay_active_time_field = TimeField::End,
+                        TimeField::End => self.overlay_active_time_field = TimeField::Start,
+                    }
+                } else if self.overlay_focus == OverlayFocus::Right
+                    && (self.overlay_active_item == 0 || self.overlay_active_item == 1)
+                {
+                    match self.overlay_active_item {
+                        0 => {
+                            if let Some(item) = self.overlay_host_filtered.get(self.overlay_host_selected) {
+                                if let Some(host) = self.all_hosts.get(item.idx) {
+                                    if self.selected_hosts.contains(host) {
+                                        self.selected_hosts.remove(host);
+                                    } else {
+                                        self.selected_hosts.insert(host.clone());
+                                    }
+                                    self.filter_entries();
+                                }
+                            }
+                        }
+                        1 => {
+                            if let Some(item) = self.overlay_dir_filtered.get(self.overlay_dir_selected) {
+                                if let Some(dir) = self.all_dirs.get(item.idx) {
+                                    if self.selected_dirs.contains(dir) {
+                                        self.selected_dirs.remove(dir);
+                                    } else {
+                                        self.selected_dirs.insert(dir.clone());
+                                    }
+                                    self.filter_entries();
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            KeyCode::Up => {
+                match self.overlay_focus {
+                    OverlayFocus::Left => {
+                        if self.overlay_active_item > 0 {
+                            self.overlay_active_item -= 1;
+                            self.overlay_right_subfocus = OverlayRightFocus::Filter;
+                        }
+                    }
+                    OverlayFocus::Right => match self.overlay_active_item {
+                        0 => {
+                            if self.overlay_host_selected > 0 {
+                                self.overlay_host_selected -= 1;
+                            }
+                        }
+                        1 => {
+                            if self.overlay_dir_selected > 0 {
+                                self.overlay_dir_selected -= 1;
+                            }
+                        }
+                        2 => {
+                            self.overlay_active_time_field = TimeField::End;
+                        }
+                        _ => {}
+                    },
+                }
+            }
+            KeyCode::Down => {
+                match self.overlay_focus {
+                    OverlayFocus::Left => {
+                        if self.overlay_active_item < 2 {
+                            self.overlay_active_item += 1;
+                            self.overlay_right_subfocus = OverlayRightFocus::Filter;
+                        }
+                    }
+                    OverlayFocus::Right => match self.overlay_active_item {
+                        0 => {
+                            let max = self.overlay_host_filtered.len().saturating_sub(1);
+                            if self.overlay_host_selected < max {
+                                self.overlay_host_selected += 1;
+                            }
+                        }
+                        1 => {
+                            let max = self.overlay_dir_filtered.len().saturating_sub(1);
+                            if self.overlay_dir_selected < max {
+                                self.overlay_dir_selected += 1;
+                            }
+                        }
+                        2 => {
+                            self.overlay_active_time_field = TimeField::Start;
+                        }
+                        _ => {}
+                    },
+                }
+            }
+            KeyCode::Char(' ') => {
+                if self.overlay_focus == OverlayFocus::Right
+                    && self.overlay_active_item == 2
+                {
+                    self.handle_overlay_time_input(key);
+                }
+            }
+            _ => {
+                if in_filter_subfocus {
+                    self.handle_overlay_filter_input(key);
+                } else if self.overlay_focus == OverlayFocus::Right
+                    && self.overlay_active_item == 2
+                {
+                    self.handle_overlay_time_input(key);
+                }
+            }
+        }
+    }
+
+    fn handle_overlay_time_input(&mut self, key: crossterm::event::KeyEvent) {
+        let (input, cursor) = match self.overlay_active_time_field {
+            TimeField::Start => (&mut self.overlay_start_time, &mut self.overlay_start_cursor),
+            TimeField::End => (&mut self.overlay_end_time, &mut self.overlay_end_cursor),
+        };
+        match key.code {
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                input.clear();
+                *cursor = 0;
+                self.filter_entries();
+            }
+            KeyCode::Char(c) => {
+                input.insert(*cursor, c);
+                *cursor += 1;
+                self.filter_entries();
+            }
+            KeyCode::Backspace if *cursor > 0 => {
+                *cursor -= 1;
+                input.remove(*cursor);
+                self.filter_entries();
+            }
+            KeyCode::Delete if *cursor < input.len() => {
+                input.remove(*cursor);
+                self.filter_entries();
+            }
+            KeyCode::Home => *cursor = 0,
+            KeyCode::End => *cursor = input.len(),
+            KeyCode::Left if *cursor > 0 => {
+                *cursor -= 1;
+            }
+            KeyCode::Right if *cursor < input.len() => {
+                *cursor += 1;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_overlay_filter_input(&mut self, key: crossterm::event::KeyEvent) {
+        let (filter, cursor, active_item) = match self.overlay_active_item {
+            0 => (&mut self.overlay_host_filter, &mut self.overlay_host_filter_cursor, 0),
+            1 => (&mut self.overlay_dir_filter, &mut self.overlay_dir_filter_cursor, 1),
+            _ => return,
+        };
+        match key.code {
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                filter.clear();
+                *cursor = 0;
+                if active_item == 0 {
+                    self.update_host_filter();
+                } else {
+                    self.update_dir_filter();
+                }
+            }
+            KeyCode::Char(c) => {
+                filter.insert(*cursor, c);
+                *cursor += 1;
+                if active_item == 0 {
+                    self.update_host_filter();
+                } else {
+                    self.update_dir_filter();
+                }
+            }
+            KeyCode::Backspace if *cursor > 0 => {
+                *cursor -= 1;
+                filter.remove(*cursor);
+                if active_item == 0 {
+                    self.update_host_filter();
+                } else {
+                    self.update_dir_filter();
+                }
+            }
+            KeyCode::Delete if *cursor < filter.len() => {
+                filter.remove(*cursor);
+                if active_item == 0 {
+                    self.update_host_filter();
+                } else {
+                    self.update_dir_filter();
+                }
+            }
+            KeyCode::Home => *cursor = 0,
+            KeyCode::End => *cursor = filter.len(),
+            KeyCode::Left if *cursor > 0 => {
+                *cursor -= 1;
+            }
+            KeyCode::Right if *cursor < filter.len() => {
+                *cursor += 1;
+            }
+            _ => {}
+        }
+    }
+
+    fn update_host_filter(&mut self) {
+        let filter = self.overlay_host_filter.trim();
+        if filter.is_empty() {
+            let mut selected = Vec::new();
+            let mut rest = Vec::new();
+            for i in 0..self.all_hosts.len() {
+                let entry = OverlayFiltered {
+                    idx: i,
+                    match_indices: Vec::new(),
+                };
+                if self.all_hosts.get(i).is_some_and(|h| self.selected_hosts.contains(h)) {
+                    selected.push(entry);
+                } else {
+                    rest.push(entry);
+                }
+            }
+            selected.append(&mut rest);
+            self.overlay_host_filtered = selected;
+        } else {
+            let factory = AndOrEngineFactory::new(ExactOrFuzzyEngineFactory::builder().build());
+            let engine = factory.create_engine(filter);
+            let items: Vec<Arc<dyn SkimItem>> = self
+                .all_hosts
+                .iter()
+                .map(|h| Arc::new(FilterItem { text: h.clone() }) as Arc<dyn SkimItem>)
+                .collect();
+            let mut results: Vec<(usize, Vec<usize>, Rank)> = items
+                .iter()
+                .enumerate()
+                .filter_map(|(i, item)| {
+                    engine.match_item(item.as_ref()).map(|r| {
+                        let indices = r.range_char_indices(&item.text());
+                        (i, indices, r.rank)
+                    })
+                })
+                .collect();
+            results.sort_by(|a, b| a.2.sort_key(RANK_CRITERIA).cmp(&b.2.sort_key(RANK_CRITERIA)));
+            self.overlay_host_filtered = results
+                .into_iter()
+                .map(|(i, mi, _)| OverlayFiltered {
+                    idx: i,
+                    match_indices: mi,
+                })
+                .collect();
+        }
+        self.overlay_host_selected = 0;
+    }
+
+    fn update_dir_filter(&mut self) {
+        let filter = self.overlay_dir_filter.trim();
+        if filter.is_empty() {
+            let mut selected = Vec::new();
+            let mut rest = Vec::new();
+            for i in 0..self.all_dirs.len() {
+                let entry = OverlayFiltered {
+                    idx: i,
+                    match_indices: Vec::new(),
+                };
+                if self.all_dirs.get(i).is_some_and(|d| self.selected_dirs.contains(d)) {
+                    selected.push(entry);
+                } else {
+                    rest.push(entry);
+                }
+            }
+            selected.append(&mut rest);
+            self.overlay_dir_filtered = selected;
+        } else {
+            let factory = AndOrEngineFactory::new(ExactOrFuzzyEngineFactory::builder().build());
+            let engine = factory.create_engine(filter);
+            let items: Vec<Arc<dyn SkimItem>> = self
+                .all_dirs
+                .iter()
+                .map(|d| Arc::new(FilterItem { text: d.clone() }) as Arc<dyn SkimItem>)
+                .collect();
+            let mut results: Vec<(usize, Vec<usize>, Rank)> = items
+                .iter()
+                .enumerate()
+                .filter_map(|(i, item)| {
+                    engine.match_item(item.as_ref()).map(|r| {
+                        let indices = r.range_char_indices(&item.text());
+                        (i, indices, r.rank)
+                    })
+                })
+                .collect();
+            results.sort_by(|a, b| a.2.sort_key(RANK_CRITERIA).cmp(&b.2.sort_key(RANK_CRITERIA)));
+            self.overlay_dir_filtered = results
+                .into_iter()
+                .map(|(i, mi, _)| OverlayFiltered {
+                    idx: i,
+                    match_indices: mi,
+                })
+                .collect();
+        }
+        self.overlay_dir_selected = 0;
     }
 
     fn render(&mut self, f: &mut Frame) {
@@ -769,6 +1199,10 @@ impl App {
         self.render_input(f, main_layout[0]);
         self.render_list_and_details(f, main_layout[1]);
         self.render_status(f, main_layout[2]);
+
+        if self.show_overlay {
+            self.render_overlay(f, area);
+        }
     }
 
     fn render_input(&self, f: &mut Frame, area: Rect) {
@@ -933,12 +1367,12 @@ impl App {
     }
 
     fn render_status(&self, f: &mut Frame, area: Rect) {
-        let hc = if self.filter_host || self.select_filter_host.is_some() { '●' } else { '○' };
-        let sc = if self.filter_session || self.select_filter_session.is_some() { '●' } else { '○' };
-        let dc = if self.filter_dir || self.select_filter_dir.is_some() { '●' } else { '○' };
+        let hc = if !self.selected_hosts.is_empty() { '●' } else { '○' };
+        let sc = if !self.selected_sessions.is_empty() { '●' } else { '○' };
+        let dc = if !self.selected_dirs.is_empty() { '●' } else { '○' };
         let left = format!(" {hc}h {sc}s {dc}d ");
         let status = Span::styled(
-            format!("{left} ↑↓:nav  enter:select  ^c:copy  esc:quit "),
+            format!("{left} ↑↓:nav  enter:select  ^c:copy  ^f:filter  esc:quit "),
             Style::default().bg(Color::Indexed(234)),
         );
         let match_count = self.total_filtered();
@@ -965,6 +1399,308 @@ impl App {
         let count_line = Line::from(Span::raw(suffix));
         f.render_widget(Paragraph::new(count_line), hlayout[1]);
     }
+
+    fn render_overlay(&self, f: &mut Frame, area: Rect) {
+        let popup_area = centered_rect(70, 65, area);
+        f.render_widget(Clear, popup_area);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title("Filter")
+            .title_style(bold())
+            .border_style(Style::default().fg(Color::Cyan));
+        f.render_widget(block.clone(), popup_area);
+
+        let inner = block.inner(popup_area);
+        let split = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(30),
+                Constraint::Percentage(70),
+            ])
+            .split(inner);
+
+        self.render_overlay_left(f, split[0]);
+        match self.overlay_active_item {
+            0 => self.render_overlay_hosts(f, split[1]),
+            1 => self.render_overlay_dirs(f, split[1]),
+            2 => self.render_overlay_time(f, split[1]),
+            _ => {}
+        }
+    }
+
+    fn render_overlay_left(&self, f: &mut Frame, area: Rect) {
+        let active = Style::default()
+            .bg(Color::Indexed(234))
+            .add_modifier(Modifier::BOLD);
+        let items: Vec<ListItem> = ["Host", "Directory", "Time Range"]
+            .iter()
+            .enumerate()
+            .map(|(i, label)| {
+                let prefix = if self.overlay_focus == OverlayFocus::Left
+                    && i == self.overlay_active_item
+                {
+                    " ▶ "
+                } else if i == self.overlay_active_item {
+                    " ▸ "
+                } else {
+                    "   "
+                };
+                let style = if i == self.overlay_active_item {
+                    active
+                } else {
+                    Style::default()
+                };
+                ListItem::new(Line::from(Span::styled(
+                    format!("{prefix}{label}"),
+                    style,
+                )))
+            })
+            .collect();
+        let block = Block::default()
+            .borders(Borders::RIGHT)
+            .style(Style::default());
+        f.render_widget(List::new(items).block(block), area);
+    }
+
+    fn render_overlay_hosts(&self, f: &mut Frame, area: Rect) {
+        let split = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(1)])
+            .split(area);
+
+        let is_filter_active = self.overlay_focus == OverlayFocus::Right
+            && self.overlay_active_item == 0
+            && self.overlay_right_subfocus == OverlayRightFocus::Filter;
+
+        self.render_filter_input(f, split[0], &self.overlay_host_filter, self.overlay_host_filter_cursor, is_filter_active, "Host", Style::default(), false);
+
+        let list_area = split[1];
+        let visible = list_area.height.saturating_sub(1) as usize;
+        let filtered = &self.overlay_host_filtered;
+        let total = filtered.len();
+        let start = self
+            .overlay_host_selected
+            .saturating_sub(visible.saturating_sub(1));
+        let items: Vec<ListItem> = filtered
+            .iter()
+            .skip(start)
+            .take(visible)
+            .enumerate()
+            .filter_map(|(i, item)| {
+                self.all_hosts.get(item.idx).map(|host| {
+                    let checked = self.selected_hosts.contains(host);
+                    let marker = if checked { "[x] " } else { "[ ] " };
+                    let is_selected = self.overlay_focus == OverlayFocus::Right
+                        && (start + i) == self.overlay_host_selected;
+                    let sel_style = if is_selected {
+                        Style::default()
+                            .bg(Color::Indexed(234))
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    let mut spans = vec![Span::styled(marker, sel_style)];
+                    spans.extend(highlight_matches(host, &item.match_indices, sel_style));
+                    ListItem::new(Line::from(spans))
+                })
+            })
+            .collect();
+        let count = format!("{total} hosts");
+        let block = Block::default()
+            .borders(Borders::NONE)
+            .title(count)
+            .title_style(bold());
+        f.render_widget(List::new(items).block(block), list_area);
+    }
+
+    fn render_overlay_dirs(&self, f: &mut Frame, area: Rect) {
+        let split = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(1)])
+            .split(area);
+
+        let is_filter_active = self.overlay_focus == OverlayFocus::Right
+            && self.overlay_active_item == 1
+            && self.overlay_right_subfocus == OverlayRightFocus::Filter;
+
+        self.render_filter_input(f, split[0], &self.overlay_dir_filter, self.overlay_dir_filter_cursor, is_filter_active, "Dir", Style::default(), false);
+
+        let list_area = split[1];
+        let visible = list_area.height.saturating_sub(1) as usize;
+        let filtered = &self.overlay_dir_filtered;
+        let total = filtered.len();
+        let start = self
+            .overlay_dir_selected
+            .saturating_sub(visible.saturating_sub(1));
+        let items: Vec<ListItem> = filtered
+            .iter()
+            .skip(start)
+            .take(visible)
+            .enumerate()
+            .filter_map(|(i, item)| {
+                self.all_dirs.get(item.idx).map(|dir| {
+                    let checked = self.selected_dirs.contains(dir);
+                    let marker = if checked { "[x] " } else { "[ ] " };
+                    let is_selected = self.overlay_focus == OverlayFocus::Right
+                        && (start + i) == self.overlay_dir_selected;
+                    let sel_style = if is_selected {
+                        Style::default()
+                            .bg(Color::Indexed(234))
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    let mut spans = vec![Span::styled(marker, sel_style)];
+                    spans.extend(highlight_matches(dir, &item.match_indices, sel_style));
+                    ListItem::new(Line::from(spans))
+                })
+            })
+            .collect();
+        let count = format!("{total} dirs");
+        let block = Block::default()
+            .borders(Borders::NONE)
+            .title(count)
+            .title_style(bold());
+        f.render_widget(List::new(items).block(block), list_area);
+    }
+
+    fn render_overlay_time(&self, f: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::NONE)
+            .title("Time Range")
+            .title_style(bold());
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let start_focused = self.overlay_focus == OverlayFocus::Right
+            && self.overlay_active_time_field == TimeField::Start;
+        let start_style = if self.overlay_start_time.is_empty() {
+            Style::default()
+        } else if Self::parse_time_input(&self.overlay_start_time, false).is_some() {
+            let s = Style::default().fg(Color::Green);
+            if start_focused { s.add_modifier(Modifier::BOLD) } else { s }
+        } else {
+            let s = Style::default().fg(Color::Red);
+            if start_focused { s.add_modifier(Modifier::BOLD) } else { s }
+        };
+        let end_focused = self.overlay_focus == OverlayFocus::Right
+            && self.overlay_active_time_field == TimeField::End;
+        let end_style = if self.overlay_end_time.is_empty() {
+            Style::default()
+        } else if Self::parse_time_input(&self.overlay_end_time, true).is_some() {
+            let s = Style::default().fg(Color::Green);
+            if end_focused { s.add_modifier(Modifier::BOLD) } else { s }
+        } else {
+            let s = Style::default().fg(Color::Red);
+            if end_focused { s.add_modifier(Modifier::BOLD) } else { s }
+        };
+
+        let hint = Line::from(Span::styled(
+            "Format: YYYY-MM-DD or YYYY-MM-DD HH:MM",
+            Style::default().fg(Color::DarkGray),
+        ));
+
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .split(inner);
+
+        self.render_filter_input(
+            f,
+            layout[0],
+            &self.overlay_start_time,
+            self.overlay_start_cursor,
+            start_focused,
+            "Start",
+            start_style,
+            start_focused,
+        );
+        self.render_filter_input(
+            f,
+            layout[1],
+            &self.overlay_end_time,
+            self.overlay_end_cursor,
+            end_focused,
+            "End",
+            end_style,
+            end_focused,
+        );
+        f.render_widget(Paragraph::new(hint), layout[2]);
+    }
+
+    fn render_filter_input(&self, f: &mut Frame, area: Rect, text: &str, cursor: usize, active: bool, title: &str, style: Style, highlight: bool) {
+        let c = cursor.min(text.len());
+        let display = if text.is_empty() {
+            Line::from(vec![Span::styled(
+                title,
+                Style::default().fg(Color::DarkGray),
+            )])
+        } else if active {
+            let cursor_char = text
+                .chars()
+                .nth(c)
+                .map(|ch| ch.to_string())
+                .unwrap_or_default();
+            let before = &text[..c];
+            let after = if c + cursor_char.len() <= text.len() {
+                &text[c + cursor_char.len()..]
+            } else {
+                ""
+            };
+            Line::from(vec![
+                Span::styled(before.to_string(), style),
+                Span::styled(cursor_char, style.add_modifier(Modifier::REVERSED)),
+                Span::styled(after.to_string(), style),
+            ])
+        } else {
+            Line::from(vec![Span::styled(text.to_string(), style)])
+        };
+
+        let title_style = if active {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default()
+        };
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .title_style(title_style);
+        let block = if highlight {
+            block.style(Style::default().bg(Color::Indexed(234)))
+        } else {
+            block
+        };
+        let inner = block.inner(area);
+        f.render_widget(Paragraph::new(display).block(block), area);
+        if active && !text.is_empty() {
+            f.set_cursor_position((inner.x + c as u16, inner.y));
+        }
+    }
+}
+
+fn centered_rect(width_pct: u16, height_pct: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - height_pct) / 2),
+            Constraint::Percentage(height_pct),
+            Constraint::Percentage((100 - height_pct) / 2),
+        ])
+        .split(r);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - width_pct) / 2),
+            Constraint::Percentage(width_pct),
+            Constraint::Percentage((100 - width_pct) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
 
 fn group_into_ranges(indices: &[usize]) -> Vec<(usize, usize)> {
@@ -989,7 +1725,7 @@ fn group_into_ranges(indices: &[usize]) -> Vec<(usize, usize)> {
 
 fn highlight_matches<'a>(text: &'a str, indices: &[usize], base_style: Style) -> Vec<Span<'a>> {
     let spans = if indices.is_empty() {
-        vec![Span::raw(text)]
+        vec![Span::styled(text, base_style)]
     } else {
         let ranges = group_into_ranges(indices);
         let hl = base_style.patch(highlight());

@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -50,6 +51,75 @@ pub enum OverlayRightFocus {
     List,
 }
 
+fn update_generic_filter(
+    filter: &str,
+    all_items: &[String],
+    selected_set: &HashSet<String>,
+) -> Vec<OverlayFiltered> {
+    let filter = filter.trim();
+    if filter.is_empty() {
+        let mut selected = Vec::new();
+        let mut rest = Vec::new();
+        for i in 0..all_items.len() {
+            let entry = OverlayFiltered {
+                idx: i,
+                match_indices: Vec::new(),
+            };
+            if all_items.get(i).is_some_and(|item| selected_set.contains(item)) {
+                selected.push(entry);
+            } else {
+                rest.push(entry);
+            }
+        }
+        selected.append(&mut rest);
+        selected
+    } else {
+        let factory = AndOrEngineFactory::new(ExactOrFuzzyEngineFactory::builder().build());
+        let engine = factory.create_engine(filter);
+        let skim_items: Vec<Arc<dyn SkimItem>> = all_items
+            .iter()
+            .map(|s| Arc::new(FilterItem { text: s.clone() }) as Arc<dyn SkimItem>)
+            .collect();
+        let mut results: Vec<(usize, Vec<usize>, Rank)> = skim_items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, item)| {
+                engine.match_item(item.as_ref()).map(|r| {
+                    let indices = r.range_char_indices(&item.text());
+                    (i, indices, r.rank)
+                })
+            })
+            .collect();
+        results.sort_by(|a, b| a.2.sort_key(RANK_CRITERIA).cmp(&b.2.sort_key(RANK_CRITERIA)));
+        results
+            .into_iter()
+            .map(|(i, mi, _)| OverlayFiltered {
+                idx: i,
+                match_indices: mi,
+            })
+            .collect()
+    }
+}
+
+fn toggle_selection(
+    filtered: &[OverlayFiltered],
+    selected_idx: usize,
+    all_items: &[String],
+    selected_set: &mut HashSet<String>,
+) -> bool {
+    if let Some(item) = filtered.get(selected_idx) {
+        if let Some(name) = all_items.get(item.idx) {
+            if selected_set.contains(name) {
+                selected_set.remove(name);
+            } else {
+                selected_set.insert(name.clone());
+            }
+            return true;
+        }
+    }
+    false
+}
+
 impl App {
     pub fn handle_overlay_event(&mut self, key: crossterm::event::KeyEvent) {
         let in_filter_subfocus = self.overlay_focus == OverlayFocus::Right
@@ -87,32 +157,19 @@ impl App {
                 } else if self.overlay_focus == OverlayFocus::Right
                     && (self.overlay_active_item == 0 || self.overlay_active_item == 1)
                 {
-                    match self.overlay_active_item {
-                        0 => {
-                            if let Some(item) = self.overlay_host_filtered.get(self.overlay_host_selected) {
-                                if let Some(host) = self.all_hosts.get(item.idx) {
-                                    if self.selected_hosts.contains(host) {
-                                        self.selected_hosts.remove(host);
-                                    } else {
-                                        self.selected_hosts.insert(host.clone());
-                                    }
-                                    self.filter_entries();
-                                }
-                            }
-                        }
-                        1 => {
-                            if let Some(item) = self.overlay_dir_filtered.get(self.overlay_dir_selected) {
-                                if let Some(dir) = self.all_dirs.get(item.idx) {
-                                    if self.selected_dirs.contains(dir) {
-                                        self.selected_dirs.remove(dir);
-                                    } else {
-                                        self.selected_dirs.insert(dir.clone());
-                                    }
-                                    self.filter_entries();
-                                }
-                            }
-                        }
-                        _ => {}
+                    let should_filter = match self.overlay_active_item {
+                        0 => toggle_selection(
+                            &self.overlay_host_filtered, self.overlay_host_selected,
+                            &self.all_hosts, &mut self.selected_hosts,
+                        ),
+                        1 => toggle_selection(
+                            &self.overlay_dir_filtered, self.overlay_dir_selected,
+                            &self.all_dirs, &mut self.selected_dirs,
+                        ),
+                        _ => false,
+                    };
+                    if should_filter {
+                        self.filter_entries();
                     }
                 }
             }
@@ -283,98 +340,20 @@ impl App {
     }
 
     pub fn update_host_filter(&mut self) {
-        let filter = self.overlay_host_filter.trim();
-        if filter.is_empty() {
-            let mut selected = Vec::new();
-            let mut rest = Vec::new();
-            for i in 0..self.all_hosts.len() {
-                let entry = OverlayFiltered {
-                    idx: i,
-                    match_indices: Vec::new(),
-                };
-                if self.all_hosts.get(i).is_some_and(|h| self.selected_hosts.contains(h)) {
-                    selected.push(entry);
-                } else {
-                    rest.push(entry);
-                }
-            }
-            selected.append(&mut rest);
-            self.overlay_host_filtered = selected;
-        } else {
-            let factory = AndOrEngineFactory::new(ExactOrFuzzyEngineFactory::builder().build());
-            let engine = factory.create_engine(filter);
-            let items: Vec<Arc<dyn SkimItem>> = self
-                .all_hosts
-                .iter()
-                .map(|h| Arc::new(FilterItem { text: h.clone() }) as Arc<dyn SkimItem>)
-                .collect();
-            let mut results: Vec<(usize, Vec<usize>, Rank)> = items
-                .iter()
-                .enumerate()
-                .filter_map(|(i, item)| {
-                    engine.match_item(item.as_ref()).map(|r| {
-                        let indices = r.range_char_indices(&item.text());
-                        (i, indices, r.rank)
-                    })
-                })
-                .collect();
-            results.sort_by(|a, b| a.2.sort_key(RANK_CRITERIA).cmp(&b.2.sort_key(RANK_CRITERIA)));
-            self.overlay_host_filtered = results
-                .into_iter()
-                .map(|(i, mi, _)| OverlayFiltered {
-                    idx: i,
-                    match_indices: mi,
-                })
-                .collect();
-        }
+        self.overlay_host_filtered = update_generic_filter(
+            &self.overlay_host_filter,
+            &self.all_hosts,
+            &self.selected_hosts,
+        );
         self.overlay_host_selected = 0;
     }
 
     pub fn update_dir_filter(&mut self) {
-        let filter = self.overlay_dir_filter.trim();
-        if filter.is_empty() {
-            let mut selected = Vec::new();
-            let mut rest = Vec::new();
-            for i in 0..self.all_dirs.len() {
-                let entry = OverlayFiltered {
-                    idx: i,
-                    match_indices: Vec::new(),
-                };
-                if self.all_dirs.get(i).is_some_and(|d| self.selected_dirs.contains(d)) {
-                    selected.push(entry);
-                } else {
-                    rest.push(entry);
-                }
-            }
-            selected.append(&mut rest);
-            self.overlay_dir_filtered = selected;
-        } else {
-            let factory = AndOrEngineFactory::new(ExactOrFuzzyEngineFactory::builder().build());
-            let engine = factory.create_engine(filter);
-            let items: Vec<Arc<dyn SkimItem>> = self
-                .all_dirs
-                .iter()
-                .map(|d| Arc::new(FilterItem { text: d.clone() }) as Arc<dyn SkimItem>)
-                .collect();
-            let mut results: Vec<(usize, Vec<usize>, Rank)> = items
-                .iter()
-                .enumerate()
-                .filter_map(|(i, item)| {
-                    engine.match_item(item.as_ref()).map(|r| {
-                        let indices = r.range_char_indices(&item.text());
-                        (i, indices, r.rank)
-                    })
-                })
-                .collect();
-            results.sort_by(|a, b| a.2.sort_key(RANK_CRITERIA).cmp(&b.2.sort_key(RANK_CRITERIA)));
-            self.overlay_dir_filtered = results
-                .into_iter()
-                .map(|(i, mi, _)| OverlayFiltered {
-                    idx: i,
-                    match_indices: mi,
-                })
-                .collect();
-        }
+        self.overlay_dir_filtered = update_generic_filter(
+            &self.overlay_dir_filter,
+            &self.all_dirs,
+            &self.selected_dirs,
+        );
         self.overlay_dir_selected = 0;
     }
 
@@ -440,36 +419,46 @@ impl App {
         f.render_widget(List::new(items).block(block), area);
     }
 
-    pub fn render_overlay_hosts(&self, f: &mut Frame, area: Rect) {
+    fn render_overlay_filter_list(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        active_item: usize,
+        filter_text: &str,
+        cursor: usize,
+        title: &str,
+        filtered: &[OverlayFiltered],
+        selected_index: usize,
+        all_items: &[String],
+        selected_set: &HashSet<String>,
+        count_label: &str,
+    ) {
         let split = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(3), Constraint::Min(1)])
             .split(area);
 
         let is_filter_active = self.overlay_focus == OverlayFocus::Right
-            && self.overlay_active_item == 0
+            && self.overlay_active_item == active_item
             && self.overlay_right_subfocus == OverlayRightFocus::Filter;
 
-        self.render_filter_input(f, split[0], &self.overlay_host_filter, self.overlay_host_filter_cursor, is_filter_active, "Host", Style::default(), false);
+        self.render_filter_input(f, split[0], filter_text, cursor, is_filter_active, title, Style::default(), false);
 
         let list_area = split[1];
         let visible = list_area.height.saturating_sub(1) as usize;
-        let filtered = &self.overlay_host_filtered;
         let total = filtered.len();
-        let start = self
-            .overlay_host_selected
-            .saturating_sub(visible.saturating_sub(1));
+        let start = selected_index.saturating_sub(visible.saturating_sub(1));
         let items: Vec<ListItem> = filtered
             .iter()
             .skip(start)
             .take(visible)
             .enumerate()
             .filter_map(|(i, item)| {
-                self.all_hosts.get(item.idx).map(|host| {
-                    let checked = self.selected_hosts.contains(host);
+                all_items.get(item.idx).map(|name| {
+                    let checked = selected_set.contains(name);
                     let marker = if checked { "[x] " } else { "[ ] " };
                     let is_selected = self.overlay_focus == OverlayFocus::Right
-                        && (start + i) == self.overlay_host_selected;
+                        && (start + i) == selected_index;
                     let sel_style = if is_selected {
                         Style::default()
                             .bg(Color::Indexed(234))
@@ -478,12 +467,12 @@ impl App {
                         Style::default()
                     };
                     let mut spans = vec![Span::styled(marker, sel_style)];
-                    spans.extend(highlight_matches(host, &item.match_indices, sel_style));
+                    spans.extend(highlight_matches(name, &item.match_indices, sel_style));
                     ListItem::new(Line::from(spans))
                 })
             })
             .collect();
-        let count = format!("{total} hosts");
+        let count = format!("{total} {count_label}");
         let block = Block::default()
             .borders(Borders::NONE)
             .title(count)
@@ -491,55 +480,22 @@ impl App {
         f.render_widget(List::new(items).block(block), list_area);
     }
 
+    pub fn render_overlay_hosts(&self, f: &mut Frame, area: Rect) {
+        self.render_overlay_filter_list(
+            f, area, 0,
+            &self.overlay_host_filter, self.overlay_host_filter_cursor,
+            "Host", &self.overlay_host_filtered, self.overlay_host_selected,
+            &self.all_hosts, &self.selected_hosts, "hosts",
+        );
+    }
+
     pub fn render_overlay_dirs(&self, f: &mut Frame, area: Rect) {
-        let split = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(1)])
-            .split(area);
-
-        let is_filter_active = self.overlay_focus == OverlayFocus::Right
-            && self.overlay_active_item == 1
-            && self.overlay_right_subfocus == OverlayRightFocus::Filter;
-
-        self.render_filter_input(f, split[0], &self.overlay_dir_filter, self.overlay_dir_filter_cursor, is_filter_active, "Dir", Style::default(), false);
-
-        let list_area = split[1];
-        let visible = list_area.height.saturating_sub(1) as usize;
-        let filtered = &self.overlay_dir_filtered;
-        let total = filtered.len();
-        let start = self
-            .overlay_dir_selected
-            .saturating_sub(visible.saturating_sub(1));
-        let items: Vec<ListItem> = filtered
-            .iter()
-            .skip(start)
-            .take(visible)
-            .enumerate()
-            .filter_map(|(i, item)| {
-                self.all_dirs.get(item.idx).map(|dir| {
-                    let checked = self.selected_dirs.contains(dir);
-                    let marker = if checked { "[x] " } else { "[ ] " };
-                    let is_selected = self.overlay_focus == OverlayFocus::Right
-                        && (start + i) == self.overlay_dir_selected;
-                    let sel_style = if is_selected {
-                        Style::default()
-                            .bg(Color::Indexed(234))
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                    };
-                    let mut spans = vec![Span::styled(marker, sel_style)];
-                    spans.extend(highlight_matches(dir, &item.match_indices, sel_style));
-                    ListItem::new(Line::from(spans))
-                })
-            })
-            .collect();
-        let count = format!("{total} dirs");
-        let block = Block::default()
-            .borders(Borders::NONE)
-            .title(count)
-            .title_style(bold());
-        f.render_widget(List::new(items).block(block), list_area);
+        self.render_overlay_filter_list(
+            f, area, 1,
+            &self.overlay_dir_filter, self.overlay_dir_filter_cursor,
+            "Dir", &self.overlay_dir_filtered, self.overlay_dir_selected,
+            &self.all_dirs, &self.selected_dirs, "dirs",
+        );
     }
 
     pub fn render_overlay_time(&self, f: &mut Frame, area: Rect) {

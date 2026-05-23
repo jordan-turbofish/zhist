@@ -817,18 +817,19 @@ impl App {
                                 self.filter_entries();
                             }
                         }
-                        KeyCode::Char(c)
-                            if !key.modifiers.contains(KeyModifiers::CONTROL)
-                                && !key.modifiers.contains(KeyModifiers::ALT) =>
-                        {
-                            self.input.insert(self.cursor, c);
-                            self.cursor += 1;
-                            self.filter_entries();
-                        }
+                            KeyCode::Char(c)
+                                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+                            {
+                                self.input.insert(self.cursor, c);
+                                self.cursor += c.len_utf8();
+                                self.filter_entries();
+                            }
                         KeyCode::Backspace
                             if self.cursor > 0 => {
-                                self.cursor -= 1;
-                                self.input.remove(self.cursor);
+                                let pos = char_boundary_left(&self.input, self.cursor - 1);
+                                self.input.remove(pos);
+                                self.cursor = pos;
                                 self.filter_entries();
                             }
                         KeyCode::Delete
@@ -838,11 +839,11 @@ impl App {
                             }
                         KeyCode::Left
                             if self.cursor > 0 => {
-                                self.cursor -= 1;
+                                self.cursor = char_boundary_left(&self.input, self.cursor - 1);
                             }
                         KeyCode::Right
                             if self.cursor < self.input.len() => {
-                                self.cursor += 1;
+                                self.cursor = char_boundary_right(&self.input, self.cursor + 1);
                             }
                         KeyCode::Home => self.cursor = 0,
                         KeyCode::End => self.cursor = self.input.len(),
@@ -1008,16 +1009,17 @@ impl App {
                 *cursor = 0;
                 self.filter_entries();
             }
-            KeyCode::Char(c) => {
-                input.insert(*cursor, c);
-                *cursor += 1;
-                self.filter_entries();
-            }
-            KeyCode::Backspace if *cursor > 0 => {
-                *cursor -= 1;
-                input.remove(*cursor);
-                self.filter_entries();
-            }
+                KeyCode::Char(c) => {
+                    input.insert(*cursor, c);
+                    *cursor += c.len_utf8();
+                    self.filter_entries();
+                }
+                KeyCode::Backspace if *cursor > 0 => {
+                    let pos = char_boundary_left(input, *cursor - 1);
+                    input.remove(pos);
+                    *cursor = pos;
+                    self.filter_entries();
+                }
             KeyCode::Delete if *cursor < input.len() => {
                 input.remove(*cursor);
                 self.filter_entries();
@@ -1025,10 +1027,10 @@ impl App {
             KeyCode::Home => *cursor = 0,
             KeyCode::End => *cursor = input.len(),
             KeyCode::Left if *cursor > 0 => {
-                *cursor -= 1;
+                *cursor = char_boundary_left(input, *cursor - 1);
             }
             KeyCode::Right if *cursor < input.len() => {
-                *cursor += 1;
+                *cursor = char_boundary_right(input, *cursor + 1);
             }
             _ => {}
         }
@@ -1050,24 +1052,25 @@ impl App {
                     self.update_dir_filter();
                 }
             }
-            KeyCode::Char(c) => {
-                filter.insert(*cursor, c);
-                *cursor += 1;
-                if active_item == 0 {
-                    self.update_host_filter();
-                } else {
-                    self.update_dir_filter();
+                KeyCode::Char(c) => {
+                    filter.insert(*cursor, c);
+                    *cursor += c.len_utf8();
+                    if active_item == 0 {
+                        self.update_host_filter();
+                    } else {
+                        self.update_dir_filter();
+                    }
                 }
-            }
-            KeyCode::Backspace if *cursor > 0 => {
-                *cursor -= 1;
-                filter.remove(*cursor);
-                if active_item == 0 {
-                    self.update_host_filter();
-                } else {
-                    self.update_dir_filter();
+                KeyCode::Backspace if *cursor > 0 => {
+                    let pos = char_boundary_left(filter, *cursor - 1);
+                    filter.remove(pos);
+                    *cursor = pos;
+                    if active_item == 0 {
+                        self.update_host_filter();
+                    } else {
+                        self.update_dir_filter();
+                    }
                 }
-            }
             KeyCode::Delete if *cursor < filter.len() => {
                 filter.remove(*cursor);
                 if active_item == 0 {
@@ -1079,10 +1082,10 @@ impl App {
             KeyCode::Home => *cursor = 0,
             KeyCode::End => *cursor = filter.len(),
             KeyCode::Left if *cursor > 0 => {
-                *cursor -= 1;
+                *cursor = char_boundary_left(filter, *cursor - 1);
             }
             KeyCode::Right if *cursor < filter.len() => {
-                *cursor += 1;
+                *cursor = char_boundary_right(filter, *cursor + 1);
             }
             _ => {}
         }
@@ -1228,10 +1231,9 @@ impl App {
 
     fn render_input_with_cursor(&self) -> Line<'_> {
         let before = &self.input[..self.cursor];
-        let at = self
-            .input
+        let at = self.input[self.cursor..]
             .chars()
-            .nth(self.cursor)
+            .next()
             .map(|c| c.to_string())
             .unwrap_or_default();
         let after = &self.input[self.cursor + at.len()..];
@@ -1641,9 +1643,9 @@ impl App {
                 Style::default().fg(Color::DarkGray),
             )])
         } else if active {
-            let cursor_char = text
+            let cursor_char = text[c..]
                 .chars()
-                .nth(c)
+                .next()
                 .map(|ch| ch.to_string())
                 .unwrap_or_default();
             let before = &text[..c];

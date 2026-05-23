@@ -70,7 +70,7 @@ fn format_short_time(ts: i64) -> String {
     let local = dt.with_timezone(&Local);
     let now = Local::now();
     if local.date_naive() == now.date_naive() {
-        local.format("%-I:%M %p").to_string()
+        local.format("%l:%M %p").to_string()
     } else {
         local.format("%Y/%m/%d").to_string()
     }
@@ -79,7 +79,7 @@ fn format_short_time(ts: i64) -> String {
 fn format_full_time(ts: i64) -> String {
     let dt: DateTime<Utc> = DateTime::from_timestamp(ts, 0).expect("invalid timestamp");
     dt.with_timezone(&Local)
-        .format("%Y/%m/%d %-I:%M:%S %p")
+        .format("%Y/%m/%d %l:%M:%S %p")
         .to_string()
 }
 

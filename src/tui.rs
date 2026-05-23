@@ -544,7 +544,7 @@ impl App {
         self.filter_token += 1;
         let token = self.filter_token;
         let query = query.to_string();
-        let entries = self.entries.clone();
+        let entries = (*self.entries).clone();
         let tx = self.filter_tx.clone();
         let cancel = self.cancel_flag.clone();
 

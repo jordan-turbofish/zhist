@@ -6,8 +6,8 @@ pub mod overlay;
 use std::collections::HashSet;
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::{self, TryRecvError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{RwLock, mpsc::{self, TryRecvError}};
 use std::time::Duration;
 
 use chrono::Local;
@@ -25,7 +25,7 @@ use self::util::osc52_copy;
 use crate::db::{self, HistdbInfo, HistoryEntry};
 
 pub struct App {
-    pub entries: Arc<Vec<HistoryEntry>>,
+    pub entries: Arc<RwLock<Vec<HistoryEntry>>>,
     pub filtered: Vec<FilteredEntry>,
     pub selected: usize,
     pub scroll: u16,
@@ -35,7 +35,7 @@ pub struct App {
     pub running: bool,
     pub output: Option<String>,
     pub entry_rx: Option<mpsc::Receiver<Vec<HistoryEntry>>>,
-    pub loading: bool,
+    pub loading: Arc<AtomicBool>,
     pub filter_token: u64,
     pub filter_rx: mpsc::Receiver<FilterMessage>,
     pub filter_tx: mpsc::Sender<FilterMessage>,
@@ -81,7 +81,7 @@ impl App {
             None => (String::new(), 0),
         };
         App {
-            entries: Arc::new(Vec::new()),
+            entries: Arc::new(RwLock::new(Vec::new())),
             filtered: Vec::new(),
             selected: 0,
             scroll: 0,
@@ -91,7 +91,7 @@ impl App {
             running: true,
             output: None,
             entry_rx: None,
-            loading: true,
+            loading: Arc::new(AtomicBool::new(true)),
             filter_token: 0,
             filter_rx,
             filter_tx,
@@ -184,15 +184,15 @@ impl App {
             Some(rx) => rx,
             None => return,
         };
-        let old_len = self.entries.len();
         let mut done = false;
+        let mut chunks: Vec<Vec<HistoryEntry>> = Vec::new();
         loop {
             match rx.try_recv() {
                 Ok(chunk) => {
                     if chunk.is_empty() {
                         done = true;
                     } else {
-                        Arc::make_mut(&mut self.entries).extend(chunk);
+                        chunks.push(chunk);
                     }
                 }
                 Err(TryRecvError::Disconnected) => {
@@ -205,21 +205,46 @@ impl App {
         if !done {
             self.entry_rx = Some(rx);
         }
-        self.loading = !done;
+        self.loading.store(!done, Ordering::Relaxed);
         if done && self.input.trim().is_empty() {
             self.filter_done = true;
         }
-        if self.entries.len() > old_len {
+
+        if !chunks.is_empty() {
+            let old_len;
             let mut hosts_changed = false;
             let mut dirs_changed = false;
-            for entry in &self.entries[old_len..] {
-                if !self.all_hosts.contains(&entry.host) {
-                    self.all_hosts.push(entry.host.clone());
-                    hosts_changed = true;
+            let mut new_filtered = Vec::new();
+            {
+                let mut entries = self.entries.write().unwrap();
+                old_len = entries.len();
+                for chunk in chunks {
+                    entries.extend(chunk);
                 }
-                if !self.all_dirs.contains(&entry.dir) {
-                    self.all_dirs.push(entry.dir.clone());
-                    dirs_changed = true;
+            }
+            {
+                let entries = self.entries.read().unwrap();
+                for entry in &entries[old_len..] {
+                    if !self.all_hosts.contains(&entry.host) {
+                        self.all_hosts.push(entry.host.clone());
+                        hosts_changed = true;
+                    }
+                    if !self.all_dirs.contains(&entry.dir) {
+                        self.all_dirs.push(entry.dir.clone());
+                        dirs_changed = true;
+                    }
+                }
+                if self.input.trim().is_empty() {
+                    let criteria = self.active_filter_criteria();
+                    new_filtered = (old_len..entries.len())
+                        .filter(|idx| criteria.matches(&entries[*idx]))
+                        .map(|idx| FilteredEntry {
+                            idx,
+                            match_indices: Vec::new(),
+                            rank: Rank::default(),
+                            start_time: entries[idx].start_time,
+                        })
+                        .collect();
                 }
             }
             if hosts_changed && self.show_overlay {
@@ -228,20 +253,8 @@ impl App {
             if dirs_changed && self.show_overlay {
                 self.update_dir_filter();
             }
-            if self.input.trim().is_empty() {
-                let criteria = self.active_filter_criteria();
-                self.filtered.extend(
-                    (old_len..self.entries.len())
-                        .filter(|idx| criteria.matches(&self.entries[*idx]))
-                        .map(|idx| FilteredEntry {
-                            idx,
-                            match_indices: Vec::new(),
-                            rank: Rank::default(),
-                            start_time: self.entries[idx].start_time,
-                        }),
-                );
-            } else {
-                self.filter_entries();
+            if !new_filtered.is_empty() {
+                self.filtered.extend(new_filtered);
             }
         }
     }
@@ -335,9 +348,9 @@ impl App {
         self.filtered.get(self.selected)
     }
 
-    fn selected_entry(&self) -> Option<&HistoryEntry> {
+    fn selected_entry(&self) -> Option<HistoryEntry> {
         self.selected_filtered()
-            .and_then(|fe| self.entries.get(fe.idx))
+            .and_then(|fe| self.entries.read().unwrap().get(fe.idx).cloned())
     }
 
     fn move_selection(&mut self, delta: i32) {
@@ -543,8 +556,8 @@ mod tests {
     use self::render::{highlight_matches, group_into_ranges};
     use ratatui::style::Style;
 
-    fn cancel() -> AtomicBool {
-        AtomicBool::new(false)
+    fn loading_done() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
     }
 
     fn entry(id: i64, start_time: i64, argv: &str) -> HistoryEntry {
@@ -561,16 +574,17 @@ mod tests {
     }
 
     fn run_filter_test(query: &str, entries: &[HistoryEntry]) -> Vec<FilteredEntry> {
+        let entries_rw = Arc::new(RwLock::new(entries.to_vec()));
         let (tx, rx) = mpsc::channel();
         run_filter_streaming(
             query,
-            entries,
-            &AtomicBool::new(false),
+            entries_rw,
+            Arc::new(AtomicBool::new(false)),
+            loading_done(),
             1,
-            &tx,
-            &FilterCriteria::none(),
+            tx,
+            FilterCriteria::none(),
         );
-        drop(tx);
         let mut heap = FilterHeap::new();
         while let Ok(msg) = rx.recv() {
             if let FilterMessage::Batch(_, batch) = msg {
@@ -603,7 +617,7 @@ mod tests {
     #[test]
     fn empty_query_returns_all() {
         let entries = vec![entry(1, 300, "bar"), entry(2, 200, "foo")];
-        let result = run_filter("", &entries, &cancel());
+        let result = run_filter("", &entries, &AtomicBool::new(false));
         assert_eq!(result.len(), 2);
     }
 
@@ -653,7 +667,7 @@ mod tests {
 
     #[test]
     fn cancellation_discards_stale() {
-        let entries = Arc::new(
+        let entries = Arc::new(RwLock::new(
             (0..200_000)
                 .map(|i| {
                     let argv = if i == 500 {
@@ -664,7 +678,7 @@ mod tests {
                     entry(i as i64, 200_000 - i as i64, &argv)
                 })
                 .collect::<Vec<_>>(),
-        );
+        ));
         let (tx, rx) = mpsc::channel();
 
         let token_a = 1u64;
@@ -675,26 +689,28 @@ mod tests {
         std::thread::spawn(move || {
             run_filter_streaming(
                 "foo",
-                &entries_a,
-                &cancel_a2,
+                entries_a,
+                cancel_a2,
+                loading_done(),
                 token_a,
-                &tx_a,
-                &FilterCriteria::none(),
+                tx_a,
+                FilterCriteria::none(),
             );
         });
 
         cancel_a.store(true, Ordering::SeqCst);
         let token_b = 2u64;
         let entries_b = entries.clone();
-        let cancel_b = AtomicBool::new(false);
+        let cancel_b = Arc::new(AtomicBool::new(false));
         std::thread::spawn(move || {
             run_filter_streaming(
                 "unique_target",
-                &entries_b,
-                &cancel_b,
+                entries_b,
+                cancel_b,
+                loading_done(),
                 token_b,
-                &tx,
-                &FilterCriteria::none(),
+                tx,
+                FilterCriteria::none(),
             );
         });
 
@@ -708,7 +724,7 @@ mod tests {
         }
         let v: Vec<FilteredEntry> = heap.drain();
         assert_eq!(v.len(), 1);
-        assert_eq!(entries[v[0].idx].argv, "unique_target_command");
+        assert_eq!(entries.read().unwrap()[v[0].idx].argv, "unique_target_command");
     }
 
     #[test]
@@ -741,24 +757,9 @@ mod tests {
             entry(2, 200, "excellent match"),
             entry(3, 300, "medium match"),
         ];
-        let (tx, rx) = mpsc::channel();
-        run_filter_streaming(
-            "match",
-            &entries,
-            &AtomicBool::new(false),
-            1,
-            &tx,
-            &FilterCriteria::none(),
-        );
-        drop(tx);
-        let mut heap = FilterHeap::new();
-        while let Ok(msg) = rx.recv() {
-            if let FilterMessage::Batch(_, batch) = msg {
-                heap.extend(batch);
-            }
-        }
+        let result = run_filter_test("match", &entries);
         let mut prev_score = i32::MAX;
-        for fe in heap.drain() {
+        for fe in result {
             assert!(
                 fe.rank.score <= prev_score,
                 "heap popped score {} after {}, ordering broken",
@@ -775,23 +776,7 @@ mod tests {
             entry(1, 1000, "older match entry"),
             entry(2, 2000, "newer match entry"),
         ];
-        let (tx, rx) = mpsc::channel();
-        run_filter_streaming(
-            "match",
-            &entries,
-            &AtomicBool::new(false),
-            1,
-            &tx,
-            &FilterCriteria::none(),
-        );
-        drop(tx);
-        let mut heap = FilterHeap::new();
-        while let Ok(msg) = rx.recv() {
-            if let FilterMessage::Batch(_, batch) = msg {
-                heap.extend(batch);
-            }
-        }
-        let results: Vec<FilteredEntry> = heap.drain();
+        let results = run_filter_test("match", &entries);
         assert_eq!(results.len(), 2);
         if results[0].rank.score == results[1].rank.score {
             assert!(

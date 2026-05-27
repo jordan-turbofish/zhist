@@ -1,7 +1,9 @@
 use std::borrow::Cow;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::time::Duration;
 
 use rayon::prelude::*;
 use skim::prelude::*;
@@ -160,11 +162,12 @@ impl FilterCriteria {
 
 pub fn run_filter_streaming(
     query: &str,
-    entries: &[HistoryEntry],
-    cancel: &AtomicBool,
+    entries: Arc<RwLock<Vec<HistoryEntry>>>,
+    cancel: Arc<AtomicBool>,
+    loading_done: Arc<AtomicBool>,
     token: u64,
-    tx: &mpsc::Sender<FilterMessage>,
-    criteria: &FilterCriteria,
+    tx: mpsc::Sender<FilterMessage>,
+    criteria: FilterCriteria,
 ) {
     if query.trim().is_empty() {
         return;
@@ -172,13 +175,33 @@ pub fn run_filter_streaming(
     let factory = AndOrEngineFactory::new(ExactOrFuzzyEngineFactory::builder().build());
     let engine = factory.create_engine(query.trim());
     let batch_size = 5_000;
+    let mut offset = 0usize;
 
-    for batch_start in (0..entries.len()).step_by(batch_size) {
+    loop {
         if cancel.load(Ordering::Relaxed) {
             return;
         }
-        let batch_end = (batch_start + batch_size).min(entries.len());
-        let batch = &entries[batch_start..batch_end];
+
+        let (batch, new_offset) = {
+            let entries_guard = entries.read().unwrap();
+            let current_len = entries_guard.len();
+            if offset >= current_len {
+                (Vec::new(), offset)
+            } else {
+                let end = (offset + batch_size).min(current_len);
+                (entries_guard[offset..end].to_vec(), end)
+            }
+        };
+
+        if batch.is_empty() {
+            if !loading_done.load(Ordering::Relaxed) {
+                let _ = tx.send(FilterMessage::Done(token));
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+
         let items: Vec<Arc<dyn SkimItem>> = batch
             .iter()
             .map(|e| Arc::new(EntryItem { entry: e.clone() }) as Arc<dyn SkimItem>)
@@ -198,7 +221,7 @@ pub fn run_filter_streaming(
                 let text = batch[i].argv.as_str();
                 let match_indices = result.range_char_indices(text);
                 Some(FilteredEntry {
-                    idx: batch_start + i,
+                    idx: offset + i,
                     match_indices,
                     rank: result.rank,
                     start_time: batch[i].start_time,
@@ -207,8 +230,8 @@ pub fn run_filter_streaming(
             .collect();
 
         let _ = tx.send(FilterMessage::Batch(token, batch_results));
+        offset = new_offset;
     }
-    let _ = tx.send(FilterMessage::Done(token));
 }
 
 impl App {
@@ -216,17 +239,22 @@ impl App {
         let criteria = self.active_filter_criteria();
         let query = self.input.trim();
         if query.is_empty() {
+            let filtered: Vec<FilteredEntry>;
+            {
+                let entries = self.entries.read().unwrap();
+                filtered = (0..entries.len())
+                    .filter(|idx| criteria.matches(&entries[*idx]))
+                    .map(|idx| FilteredEntry {
+                        idx,
+                        match_indices: Vec::new(),
+                        rank: Rank::default(),
+                        start_time: entries[idx].start_time,
+                    })
+                    .collect();
+            }
             self.heap.clear();
             self.filter_done = true;
-            self.filtered = (0..self.entries.len())
-                .filter(|idx| criteria.matches(&self.entries[*idx]))
-                .map(|idx| FilteredEntry {
-                    idx,
-                    match_indices: Vec::new(),
-                    rank: Rank::default(),
-                    start_time: self.entries[idx].start_time,
-                })
-                .collect();
+            self.filtered = filtered;
             self.filter_token += 1;
             self.restore_selection();
             self.clamp_filter_state();
@@ -241,12 +269,13 @@ impl App {
         self.filter_token += 1;
         let token = self.filter_token;
         let query = query.to_string();
-        let entries = (*self.entries).clone();
+        let entries = self.entries.clone();
         let tx = self.filter_tx.clone();
         let cancel = self.cancel_flag.clone();
+        let loading = self.loading.clone();
 
         std::thread::spawn(move || {
-            run_filter_streaming(&query, &entries, &cancel, token, &tx, &criteria);
+            run_filter_streaming(&query, entries, cancel, loading, token, tx, criteria);
         });
     }
 

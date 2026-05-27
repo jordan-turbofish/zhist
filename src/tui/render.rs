@@ -1,3 +1,5 @@
+use std::sync::atomic::Ordering;
+
 use chrono::{DateTime, Local, Utc};
 use ratatui::{
     Frame,
@@ -226,6 +228,7 @@ impl App {
             (self.scroll as usize + split[1].height as usize).min(self.total_filtered()),
         );
 
+        let entries = self.entries.read().unwrap();
         let items: Vec<ListItem> = self
             .filtered
             .iter()
@@ -233,7 +236,7 @@ impl App {
             .enumerate()
             .take_while(|(i, _)| *i < split[1].height as usize)
             .filter_map(|(i, fe)| {
-                self.entries.get(fe.idx).map(|entry| {
+                entries.get(fe.idx).map(|entry| {
                     let base_style = if i + self.scroll as usize == self.selected {
                         Style::default()
                             .bg(Color::Indexed(234))
@@ -258,19 +261,21 @@ impl App {
         let filtered = self.selected_filtered();
 
         let title = entry
+            .as_ref()
             .map(|e| format!("Details for {}", e.id))
             .unwrap_or_else(|| "Details".into());
 
         let mut detail = entry
+            .as_ref()
             .map(|entry| {
                 let b = |s| Span::styled(s, bold());
                 let mut lines: Vec<Line> = vec![
-                    Line::from(vec![b("Host:        "), Span::raw(entry.host.as_str())]),
+                    Line::from(vec![b("Host:        "), Span::raw(entry.host.clone())]),
                     Line::from(vec![
                         b("Session:     "),
                         Span::raw(entry.session.to_string()),
                     ]),
-                    Line::from(vec![b("Directory:   "), Span::raw(entry.dir.as_str())]),
+                    Line::from(vec![b("Directory:   "), Span::raw(entry.dir.clone())]),
                     Line::from(vec![
                         b("Start Time:  "),
                         Span::raw(format_full_time(entry.start_time)),
@@ -295,10 +300,12 @@ impl App {
                     Line::from(vec![b("Command:     ")]),
                     Line::from(""),
                 ]);
-                lines
-                    .into_iter()
-                    .chain(entry.argv.split('\n').map(|s| Line::from(Span::raw(s))))
-                    .collect::<Vec<Line>>()
+                let argv_lines: Vec<Line> = entry
+                    .argv
+                    .split('\n')
+                    .map(|s| Line::from(Span::raw(s.to_string())))
+                    .collect();
+                lines.into_iter().chain(argv_lines).collect::<Vec<Line>>()
             })
             .unwrap_or_default();
 
@@ -326,20 +333,21 @@ impl App {
             Style::default().bg(Color::Indexed(234)),
         );
         let match_count = self.total_filtered();
-        let suffix = if self.loading {
+        let total_entries = self.entries.read().unwrap().len();
+        let suffix = if self.loading.load(Ordering::Relaxed) {
             format!(
                 " {}/{} (loading...) ",
                 self.filtered.len(),
-                self.entries.len()
+                total_entries
             )
         } else if !self.filter_done && !self.input.trim().is_empty() {
             format!(
                 " {}/{} (filtering...) ",
                 match_count,
-                self.entries.len()
+                total_entries
             )
         } else {
-            format!(" {}/{} ", match_count, self.entries.len())
+            format!(" {}/{} ", match_count, total_entries)
         };
         let count_w = suffix.len() as u16;
         let hlayout = Layout::horizontal([Constraint::Min(0), Constraint::Length(count_w)])

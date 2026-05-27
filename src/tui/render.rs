@@ -6,7 +6,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
 use skim::Rank;
 
@@ -314,12 +314,14 @@ impl App {
             detail.push(Line::from(""));
         }
 
-        let details = Paragraph::new(detail).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(title)
-                .title_style(bold()),
-        );
+        let details = Paragraph::new(detail)
+            .wrap(Wrap { trim: true })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(title)
+                    .title_style(bold()),
+            );
         f.render_widget(details, area);
     }
 

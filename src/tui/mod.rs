@@ -140,6 +140,10 @@ impl App {
             });
         });
 
+        if !self.input.trim().is_empty() {
+            self.filter_entries();
+        }
+
         let widget = self.histdb_info.widget;
         if widget {
             self.run_terminal(io::stderr());

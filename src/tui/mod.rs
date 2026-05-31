@@ -1,26 +1,26 @@
-pub mod util;
 pub mod filter;
-pub mod render;
 pub mod overlay;
+pub mod render;
+pub mod util;
 
 use std::collections::HashSet;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{RwLock, mpsc::{self, TryRecvError}};
+use std::sync::{
+    RwLock,
+    mpsc::{self, TryRecvError},
+};
 use std::time::Duration;
 
 use chrono::Local;
 use chrono_english::{Dialect, parse_date_string};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use ratatui::{
-    Terminal,
-    backend::CrosstermBackend,
-};
+use ratatui::{Terminal, backend::CrosstermBackend};
 use skim::prelude::*;
 
-use self::filter::{FilteredEntry, FilterHeap, FilterMessage, FilterCriteria};
-use self::overlay::{OverlayFocus, OverlayRightFocus, TimeField, OverlayFiltered};
+use self::filter::{FilterCriteria, FilterHeap, FilterMessage, FilteredEntry};
+use self::overlay::{OverlayFiltered, OverlayFocus, OverlayRightFocus, TimeField};
 use self::util::osc52_copy;
 use crate::db::{self, HistdbInfo, HistoryEntry};
 
@@ -46,6 +46,7 @@ pub struct App {
     pub selected_hosts: HashSet<String>,
     pub selected_sessions: HashSet<i64>,
     pub selected_dirs: HashSet<String>,
+    pub recursive_dirs: bool,
     pub restore_entry_idx: Option<usize>,
     pub current_dir: Option<String>,
     pub initial_query: Option<String>,
@@ -102,6 +103,7 @@ impl App {
             selected_hosts: HashSet::new(),
             selected_sessions: HashSet::new(),
             selected_dirs: HashSet::new(),
+            recursive_dirs: false,
             restore_entry_idx: None,
             current_dir: std::env::current_dir()
                 .ok()
@@ -275,11 +277,24 @@ impl App {
         Some(dt.timestamp())
     }
 
+    fn find_git_root(start: &str) -> Option<String> {
+        let mut path = std::path::PathBuf::from(start);
+        loop {
+            if path.join(".git").exists() {
+                return path.to_str().map(String::from);
+            }
+            if !path.pop() {
+                return None;
+            }
+        }
+    }
+
     fn active_filter_criteria(&self) -> FilterCriteria {
         FilterCriteria {
             hosts: self.selected_hosts.iter().cloned().collect(),
             sessions: self.selected_sessions.iter().cloned().collect(),
             dirs: self.selected_dirs.iter().cloned().collect(),
+            recursive_dirs: self.recursive_dirs,
             start_time: Self::parse_time_input(&self.overlay_start_time, false),
             end_time: Self::parse_time_input(&self.overlay_end_time, true),
         }
@@ -427,34 +442,38 @@ impl App {
                             let page = (self.list_height as i32).max(1);
                             self.move_selection(page);
                         }
-                        KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL)
-                            && self.histdb_info.host.is_some() => {
-                                let entry_idx = self.selected_filtered().map(|fe| fe.idx);
-                                let host = self.histdb_info.host.clone().unwrap();
-                                if self.selected_hosts.contains(&host) {
-                                    self.selected_hosts.remove(&host);
-                                } else {
-                                    self.selected_hosts.insert(host);
-                                }
-                                if let Some(idx) = entry_idx {
-                                    self.restore_entry_idx = Some(idx);
-                                }
-                                self.filter_entries();
+                        KeyCode::Char('h')
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                && self.histdb_info.host.is_some() =>
+                        {
+                            let entry_idx = self.selected_filtered().map(|fe| fe.idx);
+                            let host = self.histdb_info.host.clone().unwrap();
+                            if self.selected_hosts.contains(&host) {
+                                self.selected_hosts.remove(&host);
+                            } else {
+                                self.selected_hosts.insert(host);
                             }
-                        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL)
-                            && self.histdb_info.session.is_some() => {
-                                let entry_idx = self.selected_filtered().map(|fe| fe.idx);
-                                let session = self.histdb_info.session.unwrap();
-                                if self.selected_sessions.contains(&session) {
-                                    self.selected_sessions.remove(&session);
-                                } else {
-                                    self.selected_sessions.insert(session);
-                                }
-                                if let Some(idx) = entry_idx {
-                                    self.restore_entry_idx = Some(idx);
-                                }
-                                self.filter_entries();
+                            if let Some(idx) = entry_idx {
+                                self.restore_entry_idx = Some(idx);
                             }
+                            self.filter_entries();
+                        }
+                        KeyCode::Char('s')
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                && self.histdb_info.session.is_some() =>
+                        {
+                            let entry_idx = self.selected_filtered().map(|fe| fe.idx);
+                            let session = self.histdb_info.session.unwrap();
+                            if self.selected_sessions.contains(&session) {
+                                self.selected_sessions.remove(&session);
+                            } else {
+                                self.selected_sessions.insert(session);
+                            }
+                            if let Some(idx) = entry_idx {
+                                self.restore_entry_idx = Some(idx);
+                            }
+                            self.filter_entries();
+                        }
                         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             let entry_idx = self.selected_filtered().map(|fe| fe.idx);
                             if let Some(ref dir) = self.current_dir {
@@ -469,6 +488,26 @@ impl App {
                                 self.restore_entry_idx = Some(idx);
                             }
                             self.filter_entries();
+                        }
+                        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.recursive_dirs = !self.recursive_dirs;
+                            self.filter_entries();
+                        }
+                        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if let Some(ref dir) = self.current_dir {
+                                if let Some(git_root) = Self::find_git_root(dir) {
+                                    if self.selected_dirs.contains(&git_root) && self.recursive_dirs
+                                    {
+                                        self.selected_dirs.remove(&git_root);
+                                        self.recursive_dirs = false;
+                                    } else {
+                                        self.selected_dirs.clear();
+                                        self.selected_dirs.insert(git_root);
+                                        self.recursive_dirs = true;
+                                    }
+                                    self.filter_entries();
+                                }
+                            }
                         }
                         KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::ALT) => {
                             let host = self.selected_entry().map(|e| e.host.clone());
@@ -496,6 +535,23 @@ impl App {
                                 self.filter_entries();
                             }
                         }
+                        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::ALT) => {
+                            let dir = self.selected_entry().map(|e| e.dir.clone());
+                            let entry_idx = self.selected_filtered().map(|fe| fe.idx);
+                            if let (Some(dir), Some(entry_idx)) = (dir, entry_idx) {
+                                let root = Self::find_git_root(&dir).unwrap_or(dir);
+                                if self.selected_dirs.contains(&root) && self.recursive_dirs {
+                                    self.selected_dirs.remove(&root);
+                                    self.recursive_dirs = false;
+                                } else {
+                                    self.selected_dirs.clear();
+                                    self.selected_dirs.insert(root);
+                                    self.recursive_dirs = true;
+                                }
+                                self.restore_entry_idx = Some(entry_idx);
+                                self.filter_entries();
+                            }
+                        }
                         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::ALT) => {
                             let dir = self.selected_entry().map(|e| e.dir.clone());
                             let entry_idx = self.selected_filtered().map(|fe| fe.idx);
@@ -517,26 +573,22 @@ impl App {
                             self.cursor += c.len_utf8();
                             self.filter_entries();
                         }
-                        KeyCode::Backspace
-                            if self.cursor > 0 => {
-                                let pos = util::char_boundary_left(&self.input, self.cursor - 1);
-                                self.input.remove(pos);
-                                self.cursor = pos;
-                                self.filter_entries();
-                            }
-                        KeyCode::Delete
-                            if self.cursor < self.input.len() => {
-                                self.input.remove(self.cursor);
-                                self.filter_entries();
-                            }
-                        KeyCode::Left
-                            if self.cursor > 0 => {
-                                self.cursor = util::char_boundary_left(&self.input, self.cursor - 1);
-                            }
-                        KeyCode::Right
-                            if self.cursor < self.input.len() => {
-                                self.cursor = util::char_boundary_right(&self.input, self.cursor + 1);
-                            }
+                        KeyCode::Backspace if self.cursor > 0 => {
+                            let pos = util::char_boundary_left(&self.input, self.cursor - 1);
+                            self.input.remove(pos);
+                            self.cursor = pos;
+                            self.filter_entries();
+                        }
+                        KeyCode::Delete if self.cursor < self.input.len() => {
+                            self.input.remove(self.cursor);
+                            self.filter_entries();
+                        }
+                        KeyCode::Left if self.cursor > 0 => {
+                            self.cursor = util::char_boundary_left(&self.input, self.cursor - 1);
+                        }
+                        KeyCode::Right if self.cursor < self.input.len() => {
+                            self.cursor = util::char_boundary_right(&self.input, self.cursor + 1);
+                        }
                         KeyCode::Home => self.cursor = 0,
                         KeyCode::End => self.cursor = self.input.len(),
                         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -555,9 +607,9 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    use self::filter::{FilterCriteria, FilterHeap, FilterMessage, run_filter_streaming};
+    use self::render::{group_into_ranges, highlight_matches};
     use super::*;
-    use self::filter::{FilterHeap, FilterMessage, FilterCriteria, run_filter_streaming};
-    use self::render::{highlight_matches, group_into_ranges};
     use ratatui::style::Style;
 
     fn loading_done() -> Arc<AtomicBool> {
@@ -728,7 +780,10 @@ mod tests {
         }
         let v: Vec<FilteredEntry> = heap.drain();
         assert_eq!(v.len(), 1);
-        assert_eq!(entries.read().unwrap()[v[0].idx].argv, "unique_target_command");
+        assert_eq!(
+            entries.read().unwrap()[v[0].idx].argv,
+            "unique_target_command"
+        );
     }
 
     #[test]

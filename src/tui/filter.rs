@@ -8,8 +8,8 @@ use std::time::Duration;
 use rayon::prelude::*;
 use skim::prelude::*;
 
-use crate::db::HistoryEntry;
 use super::App;
+use crate::db::HistoryEntry;
 
 struct EntryItem {
     entry: HistoryEntry,
@@ -120,6 +120,7 @@ pub struct FilterCriteria {
     pub hosts: Vec<String>,
     pub sessions: Vec<i64>,
     pub dirs: Vec<String>,
+    pub recursive_dirs: bool,
     pub start_time: Option<i64>,
     pub end_time: Option<i64>,
 }
@@ -131,6 +132,7 @@ impl FilterCriteria {
             hosts: Vec::new(),
             sessions: Vec::new(),
             dirs: Vec::new(),
+            recursive_dirs: false,
             start_time: None,
             end_time: None,
         }
@@ -143,8 +145,17 @@ impl FilterCriteria {
         if !self.sessions.is_empty() && !self.sessions.contains(&entry.session) {
             return false;
         }
-        if !self.dirs.is_empty() && !self.dirs.contains(&entry.dir) {
-            return false;
+        if !self.dirs.is_empty() {
+            let matched = if self.recursive_dirs {
+                self.dirs
+                    .iter()
+                    .any(|dir| entry.dir == *dir || entry.dir.starts_with(&format!("{dir}/")))
+            } else {
+                self.dirs.contains(&entry.dir)
+            };
+            if !matched {
+                return false;
+            }
         }
         if let Some(start) = self.start_time {
             if entry.start_time < start {

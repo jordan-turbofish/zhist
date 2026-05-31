@@ -10,8 +10,8 @@ use ratatui::{
 };
 use skim::Rank;
 
-use super::util;
 use super::App;
+use super::util;
 
 pub fn bold() -> Style {
     Style::default().add_modifier(Modifier::BOLD)
@@ -105,11 +105,7 @@ fn inject_newlines(spans: Vec<Span<'_>>) -> Vec<Span<'_>> {
     result
 }
 
-pub fn highlight_matches<'a>(
-    text: &'a str,
-    indices: &[usize],
-    base_style: Style,
-) -> Vec<Span<'a>> {
+pub fn highlight_matches<'a>(text: &'a str, indices: &[usize], base_style: Style) -> Vec<Span<'a>> {
     let spans = if indices.is_empty() {
         vec![Span::styled(text, base_style)]
     } else {
@@ -282,12 +278,13 @@ impl App {
                     ]),
                 ];
                 if let Some(fe) = filtered
-                    && fe.rank != Rank::default() {
-                        lines.push(Line::from(vec![
-                            b("Score:       "),
-                            Span::raw(format!("{}", fe.rank.score)),
-                        ]));
-                    }
+                    && fe.rank != Rank::default()
+                {
+                    lines.push(Line::from(vec![
+                        b("Score:       "),
+                        Span::raw(format!("{}", fe.rank.score)),
+                    ]));
+                }
                 lines.extend(vec![
                     Line::from(vec![
                         b("Runtime:     "),
@@ -314,46 +311,52 @@ impl App {
             detail.push(Line::from(""));
         }
 
-        let details = Paragraph::new(detail)
-            .wrap(Wrap { trim: true })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(title)
-                    .title_style(bold()),
-            );
+        let details = Paragraph::new(detail).wrap(Wrap { trim: true }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .title_style(bold()),
+        );
         f.render_widget(details, area);
     }
 
     pub fn render_status(&self, f: &mut Frame, area: Rect) {
-        let hc = if !self.selected_hosts.is_empty() { '●' } else { '○' };
-        let sc = if !self.selected_sessions.is_empty() { '●' } else { '○' };
-        let dc = if !self.selected_dirs.is_empty() { '●' } else { '○' };
-        let left = format!(" {hc}h {sc}s {dc}d ");
+        let hc = if !self.selected_hosts.is_empty() {
+            '●'
+        } else {
+            '○'
+        };
+        let sc = if !self.selected_sessions.is_empty() {
+            '●'
+        } else {
+            '○'
+        };
+        let (dc, d_letter) = if !self.selected_dirs.is_empty() {
+            if self.recursive_dirs {
+                ('●', 'D')
+            } else {
+                ('●', 'd')
+            }
+        } else {
+            ('○', 'd')
+        };
+        let left = format!(" {hc}h {sc}s {dc}{d_letter} ");
         let status = Span::styled(
-            format!("{left} ↑↓:nav  enter:select  ^c:copy  ^f:filter  esc:quit "),
+            format!("{left} ↑↓:nav  enter:select  ^c:copy  ^f:filter  ^r:rec  ^p:proj  esc:quit "),
             Style::default().bg(Color::Indexed(234)),
         );
         let match_count = self.total_filtered();
         let total_entries = self.entries.read().unwrap().len();
         let suffix = if self.loading.load(Ordering::Relaxed) {
-            format!(
-                " {}/{} (loading...) ",
-                self.filtered.len(),
-                total_entries
-            )
+            format!(" {}/{} (loading...) ", self.filtered.len(), total_entries)
         } else if !self.filter_done && !self.input.trim().is_empty() {
-            format!(
-                " {}/{} (filtering...) ",
-                match_count,
-                total_entries
-            )
+            format!(" {}/{} (filtering...) ", match_count, total_entries)
         } else {
             format!(" {}/{} ", match_count, total_entries)
         };
         let count_w = suffix.len() as u16;
-        let hlayout = Layout::horizontal([Constraint::Min(0), Constraint::Length(count_w)])
-            .split(area);
+        let hlayout =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(count_w)]).split(area);
         let status_line = Line::from(status);
         f.render_widget(Paragraph::new(status_line), hlayout[0]);
         let count_line = Line::from(Span::raw(suffix));

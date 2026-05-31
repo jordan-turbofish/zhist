@@ -12,10 +12,10 @@ use ratatui::{
 };
 use skim::prelude::*;
 
+use super::App;
 use super::filter::RANK_CRITERIA;
 use super::render::{self, bold, highlight_matches};
 use super::util;
-use super::App;
 
 pub struct FilterItem {
     text: String,
@@ -65,7 +65,10 @@ fn update_generic_filter(
                 idx: i,
                 match_indices: Vec::new(),
             };
-            if all_items.get(i).is_some_and(|item| selected_set.contains(item)) {
+            if all_items
+                .get(i)
+                .is_some_and(|item| selected_set.contains(item))
+            {
                 selected.push(entry);
             } else {
                 rest.push(entry);
@@ -90,7 +93,10 @@ fn update_generic_filter(
                 })
             })
             .collect();
-        results.sort_by(|a, b| a.2.sort_key(RANK_CRITERIA).cmp(&b.2.sort_key(RANK_CRITERIA)));
+        results.sort_by(|a, b| {
+            a.2.sort_key(RANK_CRITERIA)
+                .cmp(&b.2.sort_key(RANK_CRITERIA))
+        });
         results
             .into_iter()
             .map(|(i, mi, _)| OverlayFiltered {
@@ -149,7 +155,8 @@ impl App {
                     if self.overlay_active_item == 0 || self.overlay_active_item == 1 {
                         self.overlay_right_subfocus = OverlayRightFocus::Filter;
                     }
-                } else if self.overlay_focus == OverlayFocus::Right && self.overlay_active_item == 2 {
+                } else if self.overlay_focus == OverlayFocus::Right && self.overlay_active_item == 2
+                {
                     match self.overlay_active_time_field {
                         TimeField::Start => self.overlay_active_time_field = TimeField::End,
                         TimeField::End => self.overlay_active_time_field = TimeField::Start,
@@ -159,12 +166,16 @@ impl App {
                 {
                     let should_filter = match self.overlay_active_item {
                         0 => toggle_selection(
-                            &self.overlay_host_filtered, self.overlay_host_selected,
-                            &self.all_hosts, &mut self.selected_hosts,
+                            &self.overlay_host_filtered,
+                            self.overlay_host_selected,
+                            &self.all_hosts,
+                            &mut self.selected_hosts,
                         ),
                         1 => toggle_selection(
-                            &self.overlay_dir_filtered, self.overlay_dir_selected,
-                            &self.all_dirs, &mut self.selected_dirs,
+                            &self.overlay_dir_filtered,
+                            self.overlay_dir_selected,
+                            &self.all_dirs,
+                            &mut self.selected_dirs,
                         ),
                         _ => false,
                     };
@@ -173,72 +184,65 @@ impl App {
                     }
                 }
             }
-            KeyCode::Up => {
-                match self.overlay_focus {
-                    OverlayFocus::Left => {
-                        if self.overlay_active_item > 0 {
-                            self.overlay_active_item -= 1;
-                            self.overlay_right_subfocus = OverlayRightFocus::Filter;
+            KeyCode::Up => match self.overlay_focus {
+                OverlayFocus::Left => {
+                    if self.overlay_active_item > 0 {
+                        self.overlay_active_item -= 1;
+                        self.overlay_right_subfocus = OverlayRightFocus::Filter;
+                    }
+                }
+                OverlayFocus::Right => match self.overlay_active_item {
+                    0 => {
+                        if self.overlay_host_selected > 0 {
+                            self.overlay_host_selected -= 1;
                         }
                     }
-                    OverlayFocus::Right => match self.overlay_active_item {
-                        0 => {
-                            if self.overlay_host_selected > 0 {
-                                self.overlay_host_selected -= 1;
-                            }
-                        }
-                        1 => {
-                            if self.overlay_dir_selected > 0 {
-                                self.overlay_dir_selected -= 1;
-                            }
-                        }
-                        2 => {
-                            self.overlay_active_time_field = TimeField::End;
-                        }
-                        _ => {}
-                    },
-                }
-            }
-            KeyCode::Down => {
-                match self.overlay_focus {
-                    OverlayFocus::Left => {
-                        if self.overlay_active_item < 2 {
-                            self.overlay_active_item += 1;
-                            self.overlay_right_subfocus = OverlayRightFocus::Filter;
+                    1 => {
+                        if self.overlay_dir_selected > 0 {
+                            self.overlay_dir_selected -= 1;
                         }
                     }
-                    OverlayFocus::Right => match self.overlay_active_item {
-                        0 => {
-                            let max = self.overlay_host_filtered.len().saturating_sub(1);
-                            if self.overlay_host_selected < max {
-                                self.overlay_host_selected += 1;
-                            }
-                        }
-                        1 => {
-                            let max = self.overlay_dir_filtered.len().saturating_sub(1);
-                            if self.overlay_dir_selected < max {
-                                self.overlay_dir_selected += 1;
-                            }
-                        }
-                        2 => {
-                            self.overlay_active_time_field = TimeField::Start;
-                        }
-                        _ => {}
-                    },
+                    2 => {
+                        self.overlay_active_time_field = TimeField::End;
+                    }
+                    _ => {}
+                },
+            },
+            KeyCode::Down => match self.overlay_focus {
+                OverlayFocus::Left => {
+                    if self.overlay_active_item < 2 {
+                        self.overlay_active_item += 1;
+                        self.overlay_right_subfocus = OverlayRightFocus::Filter;
+                    }
                 }
-            }
+                OverlayFocus::Right => match self.overlay_active_item {
+                    0 => {
+                        let max = self.overlay_host_filtered.len().saturating_sub(1);
+                        if self.overlay_host_selected < max {
+                            self.overlay_host_selected += 1;
+                        }
+                    }
+                    1 => {
+                        let max = self.overlay_dir_filtered.len().saturating_sub(1);
+                        if self.overlay_dir_selected < max {
+                            self.overlay_dir_selected += 1;
+                        }
+                    }
+                    2 => {
+                        self.overlay_active_time_field = TimeField::Start;
+                    }
+                    _ => {}
+                },
+            },
             KeyCode::Char(' ') => {
-                if self.overlay_focus == OverlayFocus::Right
-                    && self.overlay_active_item == 2
-                {
+                if self.overlay_focus == OverlayFocus::Right && self.overlay_active_item == 2 {
                     self.handle_overlay_time_input(key);
                 }
             }
             _ => {
                 if in_filter_subfocus {
                     self.handle_overlay_filter_input(key);
-                } else if self.overlay_focus == OverlayFocus::Right
-                    && self.overlay_active_item == 2
+                } else if self.overlay_focus == OverlayFocus::Right && self.overlay_active_item == 2
                 {
                     self.handle_overlay_time_input(key);
                 }
@@ -286,8 +290,16 @@ impl App {
 
     pub fn handle_overlay_filter_input(&mut self, key: crossterm::event::KeyEvent) {
         let (filter, cursor, active_item) = match self.overlay_active_item {
-            0 => (&mut self.overlay_host_filter, &mut self.overlay_host_filter_cursor, 0),
-            1 => (&mut self.overlay_dir_filter, &mut self.overlay_dir_filter_cursor, 1),
+            0 => (
+                &mut self.overlay_host_filter,
+                &mut self.overlay_host_filter_cursor,
+                0,
+            ),
+            1 => (
+                &mut self.overlay_dir_filter,
+                &mut self.overlay_dir_filter_cursor,
+                1,
+            ),
             _ => return,
         };
         match key.code {
@@ -370,10 +382,7 @@ impl App {
         let inner = block.inner(popup_area);
         let split = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(30),
-                Constraint::Percentage(70),
-            ])
+            .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
             .split(inner);
 
         self.render_overlay_left(f, split[0]);
@@ -393,24 +402,20 @@ impl App {
             .iter()
             .enumerate()
             .map(|(i, label)| {
-                let prefix = if self.overlay_focus == OverlayFocus::Left
-                    && i == self.overlay_active_item
-                {
-                    " ▶ "
-                } else if i == self.overlay_active_item {
-                    " ▸ "
-                } else {
-                    "   "
-                };
+                let prefix =
+                    if self.overlay_focus == OverlayFocus::Left && i == self.overlay_active_item {
+                        " ▶ "
+                    } else if i == self.overlay_active_item {
+                        " ▸ "
+                    } else {
+                        "   "
+                    };
                 let style = if i == self.overlay_active_item {
                     active
                 } else {
                     Style::default()
                 };
-                ListItem::new(Line::from(Span::styled(
-                    format!("{prefix}{label}"),
-                    style,
-                )))
+                ListItem::new(Line::from(Span::styled(format!("{prefix}{label}"), style)))
             })
             .collect();
         let block = Block::default()
@@ -442,7 +447,16 @@ impl App {
             && self.overlay_active_item == active_item
             && self.overlay_right_subfocus == OverlayRightFocus::Filter;
 
-        self.render_filter_input(f, split[0], filter_text, cursor, is_filter_active, title, Style::default(), false);
+        self.render_filter_input(
+            f,
+            split[0],
+            filter_text,
+            cursor,
+            is_filter_active,
+            title,
+            Style::default(),
+            false,
+        );
 
         let list_area = split[1];
         let visible = list_area.height.saturating_sub(1) as usize;
@@ -457,8 +471,8 @@ impl App {
                 all_items.get(item.idx).map(|name| {
                     let checked = selected_set.contains(name);
                     let marker = if checked { "[x] " } else { "[ ] " };
-                    let is_selected = self.overlay_focus == OverlayFocus::Right
-                        && (start + i) == selected_index;
+                    let is_selected =
+                        self.overlay_focus == OverlayFocus::Right && (start + i) == selected_index;
                     let sel_style = if is_selected {
                         Style::default()
                             .bg(Color::Indexed(234))
@@ -482,19 +496,33 @@ impl App {
 
     pub fn render_overlay_hosts(&self, f: &mut Frame, area: Rect) {
         self.render_overlay_filter_list(
-            f, area, 0,
-            &self.overlay_host_filter, self.overlay_host_filter_cursor,
-            "Host", &self.overlay_host_filtered, self.overlay_host_selected,
-            &self.all_hosts, &self.selected_hosts, "hosts",
+            f,
+            area,
+            0,
+            &self.overlay_host_filter,
+            self.overlay_host_filter_cursor,
+            "Host",
+            &self.overlay_host_filtered,
+            self.overlay_host_selected,
+            &self.all_hosts,
+            &self.selected_hosts,
+            "hosts",
         );
     }
 
     pub fn render_overlay_dirs(&self, f: &mut Frame, area: Rect) {
         self.render_overlay_filter_list(
-            f, area, 1,
-            &self.overlay_dir_filter, self.overlay_dir_filter_cursor,
-            "Dir", &self.overlay_dir_filtered, self.overlay_dir_selected,
-            &self.all_dirs, &self.selected_dirs, "dirs",
+            f,
+            area,
+            1,
+            &self.overlay_dir_filter,
+            self.overlay_dir_filter_cursor,
+            "Dir",
+            &self.overlay_dir_filtered,
+            self.overlay_dir_selected,
+            &self.all_dirs,
+            &self.selected_dirs,
+            "dirs",
         );
     }
 
@@ -512,10 +540,18 @@ impl App {
             Style::default()
         } else if Self::parse_time_input(&self.overlay_start_time, false).is_some() {
             let s = Style::default().fg(Color::Green);
-            if start_focused { s.add_modifier(Modifier::BOLD) } else { s }
+            if start_focused {
+                s.add_modifier(Modifier::BOLD)
+            } else {
+                s
+            }
         } else {
             let s = Style::default().fg(Color::Red);
-            if start_focused { s.add_modifier(Modifier::BOLD) } else { s }
+            if start_focused {
+                s.add_modifier(Modifier::BOLD)
+            } else {
+                s
+            }
         };
         let end_focused = self.overlay_focus == OverlayFocus::Right
             && self.overlay_active_time_field == TimeField::End;
@@ -523,10 +559,18 @@ impl App {
             Style::default()
         } else if Self::parse_time_input(&self.overlay_end_time, true).is_some() {
             let s = Style::default().fg(Color::Green);
-            if end_focused { s.add_modifier(Modifier::BOLD) } else { s }
+            if end_focused {
+                s.add_modifier(Modifier::BOLD)
+            } else {
+                s
+            }
         } else {
             let s = Style::default().fg(Color::Red);
-            if end_focused { s.add_modifier(Modifier::BOLD) } else { s }
+            if end_focused {
+                s.add_modifier(Modifier::BOLD)
+            } else {
+                s
+            }
         };
 
         let hint = Line::from(Span::styled(

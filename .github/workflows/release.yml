@@ -7,6 +7,11 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
     permissions:
       contents: write
     steps:
@@ -14,20 +19,21 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-musl
+          targets: ${{ matrix.target }}
 
-      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo install cross --locked
 
-      - run: cargo build --release --target x86_64-unknown-linux-musl
+      - run: cross build --release --target ${{ matrix.target }}
 
       - run: |
           VERSION="${{ github.ref_name }}"
           VERSION="${VERSION#v}"
-          BIN="zhist-${VERSION}-linux-x64-musl"
-          strip target/x86_64-unknown-linux-musl/release/zhist
-          mv target/x86_64-unknown-linux-musl/release/zhist "target/x86_64-unknown-linux-musl/release/${BIN}"
+          ARCH="${{ matrix.target == 'x86_64-unknown-linux-musl' && 'x64' || 'arm64' }}"
+          BIN="zhist-${VERSION}-linux-${ARCH}-musl"
+          strip "target/${{ matrix.target }}/release/zhist" || true
+          mv "target/${{ matrix.target }}/release/zhist" "target/${{ matrix.target }}/release/${BIN}"
           echo "BIN=${BIN}" >>"${GITHUB_ENV}"
 
       - uses: softprops/action-gh-release@v3
         with:
-          files: target/x86_64-unknown-linux-musl/release/${{ env.BIN }}
+          files: target/${{ matrix.target }}/release/${{ env.BIN }}
